@@ -24,6 +24,7 @@ from services import transcription as transcription_api
 from services.mcp_custom import discover_custom_tools
 import sys
 from services import email_api
+from services import agentops_service
 
 
 load_dotenv()
@@ -61,6 +62,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to initialize Redis connection: {e}")
             # Continue without Redis - the application will handle Redis failures gracefully
         
+        # Initialize AgentOps
+        try:
+            agentops_service.initialize()
+            logger.info("AgentOps initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize AgentOps: {e}")
+            # Continue without AgentOps - the application will handle AgentOps failures gracefully
+        
         # Start background tasks
         # asyncio.create_task(agent_api.restore_running_agent_runs())
         
@@ -69,6 +78,14 @@ async def lifespan(app: FastAPI):
         # Clean up agent resources
         logger.info("Cleaning up agent resources")
         await agent_api.cleanup()
+        
+        # Clean up AgentOps
+        try:
+            logger.info("Cleaning up AgentOps")
+            agentops_service.cleanup()
+            logger.info("AgentOps cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during AgentOps cleanup: {e}")
         
         # Clean up Redis connection
         try:

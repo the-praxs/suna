@@ -23,6 +23,7 @@ from services.llm import make_llm_api_call
 from run_agent_background import run_agent_background, _cleanup_redis_response_list, update_agent_run_status
 from utils.constants import MODEL_NAME_ALIASES
 from flags.flags import is_enabled
+from services import agentops_service
 
 # Initialize shared resources
 router = APIRouter()
@@ -163,6 +164,15 @@ async def stop_agent_run(agent_run_id: str, error_message: Optional[str] = None)
     logger.info(f"Stopping agent run: {agent_run_id}")
     client = await db.client
     final_status = "failed" if error_message else "stopped"
+    
+    # Get thread_id for this agent run
+    thread_id = None
+    try:
+        agent_run_result = await client.table('agent_runs').select('thread_id').eq('id', agent_run_id).execute()
+        if agent_run_result.data:
+            thread_id = agent_run_result.data[0].get('thread_id')
+    except Exception as e:
+        logger.error(f"Failed to get thread_id for agent run {agent_run_id}: {e}")
 
     # Attempt to fetch final responses from Redis
     response_list_key = f"agent_run:{agent_run_id}:responses"
@@ -182,6 +192,14 @@ async def stop_agent_run(agent_run_id: str, error_message: Optional[str] = None)
 
     if not update_success:
         logger.error(f"Failed to update database status for stopped/failed run {agent_run_id}")
+    
+    # End AgentOps session if we have thread_id
+    if thread_id:
+        try:
+            agentops_service.end_thread_session(thread_id, status=final_status, error=error_message)
+            logger.info(f"Ended AgentOps session for thread {thread_id} due to stop signal")
+        except Exception as e:
+            logger.error(f"Failed to end AgentOps session for thread {thread_id}: {e}")
 
     # Send STOP signal to the global control channel
     global_control_channel = f"agent_run:{agent_run_id}:control"
@@ -463,6 +481,34 @@ async def start_agent(
         await redis.set(instance_key, "running", ex=redis.REDIS_KEY_TTL)
     except Exception as e:
         logger.warning(f"Failed to register agent run in Redis ({instance_key}): {str(e)}")
+    
+    # Start AgentOps tracking
+    try:
+        # Start or get trace for this project (chat)
+        trace_metadata = {
+            "account_id": account_id,
+            "user_id": user_id,
+            "model": model_name
+        }
+        agentops_service.start_chat_trace(project_id, metadata=trace_metadata)
+        
+        # Start session for this thread
+        thread_metadata = {
+            "agent_run_id": agent_run_id,
+            "model": model_name,
+            "enable_thinking": body.enable_thinking,
+            "reasoning_effort": body.reasoning_effort,
+            "is_agent_builder": is_agent_builder
+        }
+        if agent_config:
+            thread_metadata["agent_name"] = agent_config.get("name", "default")
+            thread_metadata["agent_id"] = agent_config.get("agent_id")
+        
+        agentops_service.start_thread_session(thread_id, project_id, metadata=thread_metadata)
+        logger.info(f"Started AgentOps tracking for thread {thread_id}")
+    except Exception as e:
+        logger.error(f"Failed to start AgentOps tracking: {e}")
+        # Continue without AgentOps - non-blocking
 
     # Run the agent in the background
     run_agent_background.send(

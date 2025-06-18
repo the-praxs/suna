@@ -26,6 +26,7 @@ from agentpress.utils.json_helpers import (
     to_json_string, format_for_yield
 )
 from litellm import token_counter
+from services import agentops_service
 
 # Type alias for XML result adding strategy
 XmlAddingStrategy = Literal["user_message", "assistant_message", "inline_edit"]
@@ -266,7 +267,7 @@ class ResponseProcessor:
                                         if started_msg_obj: yield format_for_yield(started_msg_obj)
                                         yielded_tool_indices.add(tool_index) # Mark status as yielded
 
-                                        execution_task = asyncio.create_task(self._execute_tool(tool_call))
+                                        execution_task = asyncio.create_task(self._execute_tool(tool_call, thread_id))
                                         pending_tool_executions.append({
                                             "task": execution_task, "tool_call": tool_call,
                                             "tool_index": tool_index, "context": context
@@ -900,7 +901,7 @@ class ResponseProcessor:
             if config.execute_tools and tool_calls_to_execute:
                 logger.info(f"Executing {len(tool_calls_to_execute)} tools with strategy: {config.tool_execution_strategy}")
                 self.trace.event(name="executing_tools_with_strategy", level="DEFAULT", status_message=(f"Executing {len(tool_calls_to_execute)} tools with strategy: {config.tool_execution_strategy}"))
-                tool_results = await self._execute_tools(tool_calls_to_execute, config.tool_execution_strategy)
+                tool_results = await self._execute_tools(tool_calls_to_execute, config.tool_execution_strategy, thread_id)
 
                 for i, (returned_tool_call, result) in enumerate(tool_results):
                     original_data = all_tool_data[i]
@@ -1314,7 +1315,7 @@ class ResponseProcessor:
         return parsed_data
 
     # Tool execution methods
-    async def _execute_tool(self, tool_call: Dict[str, Any]) -> ToolResult:
+    async def _execute_tool(self, tool_call: Dict[str, Any], thread_id: Optional[str] = None) -> ToolResult:
         """Execute a single tool call and return the result."""
         span = self.trace.span(name=f"execute_tool.{tool_call['function_name']}", input=tool_call["arguments"])            
         try:
@@ -1341,19 +1342,84 @@ class ResponseProcessor:
                 return ToolResult(success=False, output=f"Tool function '{function_name}' not found")
             
             logger.debug(f"Found tool function for '{function_name}', executing...")
+            
+            # Track tool call with AgentOps before execution
+            if thread_id:
+                try:
+                    # Determine tool type based on function name
+                    tool_type = "unknown"
+                    if "browser" in function_name.lower():
+                        tool_type = "browser"
+                    elif "file" in function_name.lower():
+                        tool_type = "file"
+                    elif "shell" in function_name.lower() or "command" in function_name.lower():
+                        tool_type = "shell"
+                    elif "web" in function_name.lower() or "search" in function_name.lower():
+                        tool_type = "web_search"
+                    elif "vision" in function_name.lower() or "image" in function_name.lower():
+                        tool_type = "vision"
+                    elif "deploy" in function_name.lower():
+                        tool_type = "deploy"
+                    elif "mcp" in function_name.lower():
+                        tool_type = "mcp"
+                    else:
+                        tool_type = function_name.lower()
+                    
+                    # Start tracking before execution
+                    agentops_service.track_tool_call(
+                        thread_id=thread_id,
+                        tool_name=function_name,
+                        tool_type=tool_type,
+                        parameters=arguments,
+                        status="started"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to track tool call start with AgentOps: {e}")
+            
             result = await tool_fn(**arguments)
             logger.info(f"Tool execution complete: {function_name} -> {result}")
+            
+            # Track successful tool completion with AgentOps
+            if thread_id:
+                try:
+                    agentops_service.track_tool_call(
+                        thread_id=thread_id,
+                        tool_name=function_name,
+                        tool_type=tool_type if 'tool_type' in locals() else "unknown",
+                        parameters=arguments,
+                        result=str(result) if result else None,
+                        status="completed"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to track tool call completion with AgentOps: {e}")
+            
             span.end(status_message="tool_executed", output=result)
             return result
         except Exception as e:
             logger.error(f"Error executing tool {tool_call['function_name']}: {str(e)}", exc_info=True)
+            
+            # Track failed tool execution with AgentOps
+            if thread_id:
+                try:
+                    agentops_service.track_tool_call(
+                        thread_id=thread_id,
+                        tool_name=function_name,
+                        tool_type=tool_type if 'tool_type' in locals() else "unknown",
+                        parameters=arguments if 'arguments' in locals() else {},
+                        error=str(e),
+                        status="failed"
+                    )
+                except Exception as track_err:
+                    logger.warning(f"Failed to track tool call error with AgentOps: {track_err}")
+            
             span.end(status_message="tool_execution_error", output=f"Error executing tool: {str(e)}", level="ERROR")
             return ToolResult(success=False, output=f"Error executing tool: {str(e)}")
 
     async def _execute_tools(
         self, 
         tool_calls: List[Dict[str, Any]], 
-        execution_strategy: ToolExecutionStrategy = "sequential"
+        execution_strategy: ToolExecutionStrategy = "sequential",
+        thread_id: Optional[str] = None
     ) -> List[Tuple[Dict[str, Any], ToolResult]]:
         """Execute tool calls with the specified strategy.
         
@@ -1373,14 +1439,14 @@ class ResponseProcessor:
         self.trace.event(name="executing_tools_with_strategy", level="DEFAULT", status_message=(f"Executing {len(tool_calls)} tools with strategy: {execution_strategy}"))
             
         if execution_strategy == "sequential":
-            return await self._execute_tools_sequentially(tool_calls)
+            return await self._execute_tools_sequentially(tool_calls, thread_id)
         elif execution_strategy == "parallel":
-            return await self._execute_tools_in_parallel(tool_calls)
+            return await self._execute_tools_in_parallel(tool_calls, thread_id)
         else:
             logger.warning(f"Unknown execution strategy: {execution_strategy}, falling back to sequential")
-            return await self._execute_tools_sequentially(tool_calls)
+            return await self._execute_tools_sequentially(tool_calls, thread_id)
 
-    async def _execute_tools_sequentially(self, tool_calls: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], ToolResult]]:
+    async def _execute_tools_sequentially(self, tool_calls: List[Dict[str, Any]], thread_id: Optional[str] = None) -> List[Tuple[Dict[str, Any], ToolResult]]:
         """Execute tool calls sequentially and return results.
         
         This method executes tool calls one after another, waiting for each tool to complete
@@ -1406,7 +1472,7 @@ class ResponseProcessor:
                 logger.debug(f"Executing tool {index+1}/{len(tool_calls)}: {tool_name}")
                 
                 try:
-                    result = await self._execute_tool(tool_call)
+                    result = await self._execute_tool(tool_call, thread_id)
                     results.append((tool_call, result))
                     logger.debug(f"Completed tool {tool_name} with success={result.success}")
                     
@@ -1438,7 +1504,7 @@ class ResponseProcessor:
                             
             return (results if 'results' in locals() else []) + error_results
 
-    async def _execute_tools_in_parallel(self, tool_calls: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], ToolResult]]:
+    async def _execute_tools_in_parallel(self, tool_calls: List[Dict[str, Any]], thread_id: Optional[str] = None) -> List[Tuple[Dict[str, Any], ToolResult]]:
         """Execute tool calls in parallel and return results.
         
         This method executes all tool calls simultaneously using asyncio.gather, which
@@ -1459,7 +1525,7 @@ class ResponseProcessor:
             self.trace.event(name="executing_tools_in_parallel", level="DEFAULT", status_message=(f"Executing {len(tool_calls)} tools in parallel: {tool_names}"))
             
             # Create tasks for all tool calls
-            tasks = [self._execute_tool(tool_call) for tool_call in tool_calls]
+            tasks = [self._execute_tool(tool_call, thread_id) for tool_call in tool_calls]
             
             # Execute all tasks concurrently with error handling
             results = await asyncio.gather(*tasks, return_exceptions=True)

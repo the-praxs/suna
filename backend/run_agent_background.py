@@ -16,6 +16,7 @@ from dramatiq.brokers.rabbitmq import RabbitmqBroker
 import os
 from services.langfuse import langfuse
 from utils.retry import retry
+from services import agentops_service
 
 rabbitmq_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -200,6 +201,13 @@ async def run_agent_background(
 
         # Update DB status
         await update_agent_run_status(client, agent_run_id, final_status, error=error_message, responses=all_responses)
+        
+        # End AgentOps session
+        try:
+            agentops_service.end_thread_session(thread_id, status=final_status, error=error_message)
+            logger.info(f"Ended AgentOps session for thread {thread_id} with status: {final_status}")
+        except Exception as e:
+            logger.error(f"Failed to end AgentOps session: {e}")
 
         # Publish final control signal (END_STREAM or ERROR)
         control_signal = "END_STREAM" if final_status == "completed" else "ERROR" if final_status == "failed" else "STOP"
@@ -237,6 +245,13 @@ async def run_agent_background(
 
         # Update DB status
         await update_agent_run_status(client, agent_run_id, "failed", error=f"{error_message}\n{traceback_str}", responses=all_responses)
+        
+        # End AgentOps session with error
+        try:
+            agentops_service.end_thread_session(thread_id, status="error", error=error_message)
+            logger.info(f"Ended AgentOps session for thread {thread_id} with error status")
+        except Exception as e:
+            logger.error(f"Failed to end AgentOps session in error handler: {e}")
 
         # Publish ERROR signal
         try:

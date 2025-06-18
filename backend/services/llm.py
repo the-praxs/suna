@@ -18,6 +18,7 @@ from openai import OpenAIError
 import litellm
 from utils.logger import logger
 from utils.config import config
+from services import agentops_service
 
 # litellm.set_verbose=True
 litellm.modify_params=True
@@ -253,7 +254,8 @@ async def make_llm_api_call(
     top_p: Optional[float] = None,
     model_id: Optional[str] = None,
     enable_thinking: Optional[bool] = False,
-    reasoning_effort: Optional[str] = 'low'
+    reasoning_effort: Optional[str] = 'low',
+    thread_id: Optional[str] = None
 ) -> Union[Dict[str, Any], AsyncGenerator]:
     """
     Make an API call to a language model using LiteLLM.
@@ -309,6 +311,30 @@ async def make_llm_api_call(
             response = await litellm.acompletion(**params)
             logger.debug(f"Successfully received API response from {model_name}")
             logger.debug(f"Response: {response}")
+            
+            # Track successful LLM call with AgentOps
+            if thread_id and hasattr(response, 'usage'):
+                try:
+                    tokens = {
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "total_tokens": response.usage.total_tokens
+                    }
+                    agentops_service.track_llm_call(
+                        thread_id=thread_id,
+                        model=model_name,
+                        messages=messages,
+                        response={"model": response.model, "id": response.id},
+                        tokens=tokens,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                        enable_thinking=enable_thinking,
+                        reasoning_effort=reasoning_effort
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to track LLM call with AgentOps: {e}")
+            
             return response
 
         except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
@@ -317,6 +343,24 @@ async def make_llm_api_call(
 
         except Exception as e:
             logger.error(f"Unexpected error during API call: {str(e)}", exc_info=True)
+            
+            # Track failed LLM call with AgentOps
+            if thread_id:
+                try:
+                    agentops_service.track_llm_call(
+                        thread_id=thread_id,
+                        model=model_name,
+                        messages=messages,
+                        error=str(e),
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                        enable_thinking=enable_thinking,
+                        reasoning_effort=reasoning_effort
+                    )
+                except Exception as track_err:
+                    logger.warning(f"Failed to track failed LLM call with AgentOps: {track_err}")
+            
             raise LLMError(f"API call failed: {str(e)}")
 
     error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"

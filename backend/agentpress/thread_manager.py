@@ -26,6 +26,7 @@ from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
 from litellm import token_counter
+from services import agentops_service
 
 # Type alias for tool choice
 ToolChoice = Literal["auto", "required", "none"]
@@ -527,7 +528,8 @@ Here are the XML tools available with examples:
                         tool_choice=tool_choice if processor_config.native_tool_calling else None,
                         stream=stream,
                         enable_thinking=enable_thinking,
-                        reasoning_effort=reasoning_effort
+                        reasoning_effort=reasoning_effort,
+                        thread_id=thread_id  # Pass thread_id for AgentOps tracking
                     )
                     logger.debug("Successfully received raw LLM API response stream/object")
 
