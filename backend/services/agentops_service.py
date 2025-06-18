@@ -78,6 +78,7 @@ def start_chat_trace(project_id: str, metadata: Optional[Dict[str, Any]] = None)
         if metadata:
             tags.extend([f"{k}:{v}" for k, v in metadata.items() if isinstance(v, (str, int, float))])
         
+        # Start the trace
         trace_context = agentops.start_trace(
             trace_name=trace_name,
             tags=tags
@@ -87,12 +88,7 @@ def start_chat_trace(project_id: str, metadata: Optional[Dict[str, Any]] = None)
         
         if trace_context:
             logger.info(f"Started AgentOps trace for project {project_id}")
-            # Log the session URL if available
-            try:
-                session_url = f"https://app.agentops.ai/drilldown?session_id={trace_context.span.context.trace_id}"
-                logger.info(f"AgentOps session URL: {session_url}")
-            except Exception:
-                pass
+            # AgentOps will automatically log the session URL
         
         return trace_context
         
