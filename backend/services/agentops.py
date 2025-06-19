@@ -3,6 +3,8 @@ AgentOps integration service for tracking agent conversations and tool usage.
 """
 
 import os
+import json
+import ast
 from typing import Optional, Any, Dict
 import agentops
 from agentops import TraceContext
@@ -41,7 +43,7 @@ def initialize_agentops():
         agentops.init(
             api_key=api_key,
             log_level=log_level,
-            instrument_llm_calls=True,  # Automatically track LLM calls
+            instrument_llm_calls=False,  # Disable automatic LLM instrumentation - we handle it manually
             auto_start_session=False,   # We'll manage traces manually
             fail_safe=True,            # Don't crash if AgentOps has issues
         )
@@ -184,19 +186,29 @@ async def tool_span(tool_name: str, tool_args: Optional[Dict[str, Any]] = None):
     # Get the tracer from AgentOps
     from agentops.sdk.core import tracer
     from agentops.semconv import SpanKind
+    from opentelemetry.trace import SpanKind as OTelSpanKind
     
     # Create span attributes
     attributes = {
+        # AgentOps specific attributes
         "agentops.span_kind": SpanKind.TOOL,
+        "agentops.span_type": "tool",
+        
+        # Tool attributes
         "tool.name": tool_name,
         "tool.args": str(tool_args) if tool_args else "",
+        
+        # Span categorization
+        "span.kind": "client",
+        "span.type": "tool_execution",
     }
     
     # Start the tool span
     otel_tracer = tracer.get_tracer()
     with otel_tracer.start_as_current_span(
         f"tool.{tool_name}",
-        attributes=attributes
+        attributes=attributes,
+        kind=OTelSpanKind.CLIENT  # Set OpenTelemetry span kind
     ) as span:
         start_time = time.time()
         
@@ -233,6 +245,33 @@ async def tool_span(tool_name: str, tool_args: Optional[Dict[str, Any]] = None):
                     logger.error(f"Failed to record tool error: {e}")
         
         yield ToolSpanContext(span)
+
+
+def _extract_content_from_structured_format(content):
+    """
+    Extract text content from message content.
+    For strings: return as-is
+    For lists: extract text from first item with type='text'
+    """
+    # If content is a string that looks like a list, try to parse it
+    if isinstance(content, str) and content.strip().startswith("["):
+        try:
+            content = json.loads(content)
+        except:
+            try:
+                content = ast.literal_eval(content)
+            except:
+                # If parsing fails, return as-is
+                return content
+    
+    # If content is a list, get the text from the first item
+    if isinstance(content, list) and len(content) > 0:
+        first_item = content[0]
+        if isinstance(first_item, dict) and first_item.get("type") == "text":
+            return first_item.get("text", "")
+    
+    # Return content as-is (string or other)
+    return content
 
 
 @contextmanager
@@ -281,25 +320,53 @@ def llm_span(
     # Get the tracer from AgentOps
     from agentops.sdk.core import tracer
     from agentops.semconv import SpanKind
+    from opentelemetry.trace import SpanKind as OTelSpanKind
     
-    # Create span attributes
+    # Import SpanAttributes for semantic conventions
+    from agentops.semconv import SpanAttributes
+    
+    # Create span attributes following OpenTelemetry Gen AI semantic conventions
     attributes = {
-        "agentops.span_kind": SpanKind.LLM,
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_tokens or -1,
-        "has_tools": bool(tools),
-        "tool_count": len(tools) if tools else 0,
-        "has_system_prompt": bool(system_prompt),
-        "message_count": len(messages),
-        "stream": kwargs.get("stream", False),
+        # Core AgentOps attribute
+        SpanAttributes.AGENTOPS_SPAN_KIND: SpanKind.LLM,
+        
+        # Gen AI semantic convention attributes
+        SpanAttributes.LLM_SYSTEM: model.split("/")[0] if "/" in model else "openai",
+        SpanAttributes.LLM_REQUEST_MODEL: model,
+        SpanAttributes.LLM_REQUEST_TEMPERATURE: temperature,
+        SpanAttributes.LLM_REQUEST_MAX_TOKENS: max_tokens if max_tokens else -1,
+        SpanAttributes.LLM_REQUEST_STREAMING: kwargs.get("stream", False),
     }
     
-    # Start the LLM span
+    # Add prompts/messages following the semantic convention
+    if messages:
+        for i, msg in enumerate(messages):
+            prefix = f"{SpanAttributes.LLM_PROMPTS}.{i}"
+            if "role" in msg:
+                attributes[f"{prefix}.role"] = msg["role"]
+            if "content" in msg:
+                content = _extract_content_from_structured_format(msg["content"])
+                # Limit content size to avoid huge spans
+                attributes[f"{prefix}.content"] = content[:2000]
+    
+    # Add tools/functions if present
+    if tools:
+        for i, tool in enumerate(tools):
+            if isinstance(tool, dict):
+                prefix = f"{SpanAttributes.LLM_REQUEST_FUNCTIONS}.{i}"
+                attributes[f"{prefix}.name"] = tool.get("name", "")
+                if "description" in tool:
+                    attributes[f"{prefix}.description"] = tool["description"][:200]
+    
+    # Start the LLM span within the current trace context
     otel_tracer = tracer.get_tracer()
+    
+    # Ensure we're creating the span within the AgentOps trace context
+    # This helps ensure the span is properly associated with the trace
     with otel_tracer.start_as_current_span(
         f"llm.{model}",
-        attributes=attributes
+        attributes=attributes,
+        kind=OTelSpanKind.CLIENT  # Set OpenTelemetry span kind
     ) as span:
         start_time = time.time()
         
@@ -311,37 +378,52 @@ def llm_span(
             def record_response(self, response):
                 """Record the LLM response to the span."""
                 try:
-                    # Update span with response data
+                    # Update span with response data following semantic conventions
                     if hasattr(response, "choices") and response.choices:
                         choice = response.choices[0]
+                        
+                        # Response model (might be different from request)
+                        if hasattr(response, "model"):
+                            self.span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL, response.model)
+                        
+                        # Finish reason
+                        if hasattr(choice, "finish_reason"):
+                            self.span.set_attribute(SpanAttributes.LLM_RESPONSE_FINISH_REASON, choice.finish_reason)
+                        
+                        # Response ID
+                        if hasattr(response, "id"):
+                            self.span.set_attribute(SpanAttributes.LLM_RESPONSE_ID, response.id)
+                        
                         if hasattr(choice, "message"):
-                            # Set completion as span attribute
-                            completion = choice.message.content if hasattr(choice.message, "content") else str(choice.message)
+                            # Extract and set completion following semantic convention
+                            raw_content = choice.message.content if hasattr(choice.message, "content") else str(choice.message)
+                            completion = _extract_content_from_structured_format(raw_content)
+                            
                             if completion:
-                                self.span.set_attribute("completion", completion[:1000])  # Limit size
+                                # Use the semantic convention for completions
+                                self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant")
+                                self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.content", completion[:2000])
                             
                             # Track tool calls if present
                             if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-                                self.span.set_attribute("tool_calls_count", len(choice.message.tool_calls))
-                                tool_names = [tc.function.name for tc in choice.message.tool_calls if hasattr(tc, "function")]
-                                if tool_names:
-                                    self.span.set_attribute("tool_calls", ",".join(tool_names))
+                                for i, tc in enumerate(choice.message.tool_calls):
+                                    prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls.{i}"
+                                    self.span.set_attribute(f"{prefix}.id", tc.id if hasattr(tc, "id") else "")
+                                    if hasattr(tc, "function"):
+                                        self.span.set_attribute(f"{prefix}.name", tc.function.name)
+                                        self.span.set_attribute(f"{prefix}.arguments", tc.function.arguments[:500])
                     
-                    # Add usage data if available
+                    # Add usage data following semantic conventions
                     if hasattr(response, "usage"):
-                        self.span.set_attribute("prompt_tokens", response.usage.prompt_tokens)
-                        self.span.set_attribute("completion_tokens", response.usage.completion_tokens)
-                        total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens
-                        self.span.set_attribute("total_tokens", total_tokens)
+                        self.span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS, response.usage.prompt_tokens)
+                        self.span.set_attribute(SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, response.usage.completion_tokens)
+                        total = response.usage.prompt_tokens + response.usage.completion_tokens
+                        self.span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total)
                     
-                    # Set messages as event
-                    self.span.add_event(
-                        "llm_call",
-                        attributes={
-                            "messages": str(messages)[:5000],  # Limit size
-                            "system_prompt": system_prompt[:1000] if system_prompt else "",
-                        }
-                    )
+                    
+                    # Set successful status
+                    from opentelemetry.trace import Status, StatusCode
+                    self.span.set_status(Status(StatusCode.OK))
                     
                 except Exception as e:
                     logger.error(f"Failed to record LLM response: {e}")
