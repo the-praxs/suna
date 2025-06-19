@@ -18,15 +18,11 @@ from openai import OpenAIError
 import litellm
 from utils.logger import logger
 from utils.config import config
-import agentops
-from services.agentops import get_current_trace_context, is_initialized as agentops_is_initialized
-from services.agentops_litellm_callback import agentops_callback
+from services.agentops import get_current_trace_context, is_initialized as agentops_is_initialized, llm_span
 
 # litellm.set_verbose=True
 litellm.modify_params=True
 
-# Configure LiteLLM callbacks
-litellm.callbacks = []
 
 # Constants
 MAX_RETRIES = 2
@@ -246,13 +242,7 @@ def prepare_params(
 
     return params
 
-def ensure_agentops_callback():
-    """Ensure AgentOps callback is registered with LiteLLM if AgentOps is initialized."""
-    if agentops_is_initialized() and agentops_callback not in litellm.callbacks:
-        litellm.callbacks.append(agentops_callback)
-        logger.debug("AgentOps callback registered with LiteLLM")
 
-@agentops.task
 async def make_llm_api_call(
     messages: List[Dict[str, Any]],
     model_name: str,
@@ -295,9 +285,6 @@ async def make_llm_api_call(
         LLMRetryError: If API call fails after retries
         LLMError: For other API-related errors
     """
-    # Ensure AgentOps callback is registered
-    ensure_agentops_callback()
-    
     # debug <timestamp>.json messages
     logger.info(f"Making LLM API call to model: {model_name} (Thinking: {enable_thinking}, Effort: {reasoning_effort})")
     logger.info(f"📡 API Call: Using model {model_name}")
@@ -317,30 +304,54 @@ async def make_llm_api_call(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort
     )
-    last_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            logger.debug(f"Attempt {attempt + 1}/{MAX_RETRIES}")
-            # logger.debug(f"API request parameters: {json.dumps(params, indent=2)}")
+    
+    # Use AgentOps LLM span context manager
+    with llm_span(
+        model=model_name,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tools=tools,
+        top_p=top_p,
+        stream=stream
+    ) as span:
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.debug(f"Attempt {attempt + 1}/{MAX_RETRIES}")
+                # logger.debug(f"API request parameters: {json.dumps(params, indent=2)}")
 
-            response = await litellm.acompletion(**params)
-            logger.debug(f"Successfully received API response from {model_name}")
-            logger.debug(f"Response: {response}")
-            return response
+                response = await litellm.acompletion(**params)
+                logger.debug(f"Successfully received API response from {model_name}")
+                logger.debug(f"Response: {response}")
+                
+                # Record the response in AgentOps if span is available
+                if span:
+                    span.record_response(response)
+                
+                return response
 
-        except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
-            last_error = e
-            await handle_error(e, attempt, MAX_RETRIES)
+            except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
+                last_error = e
+                await handle_error(e, attempt, MAX_RETRIES)
 
-        except Exception as e:
-            logger.error(f"Unexpected error during API call: {str(e)}", exc_info=True)
-            raise LLMError(f"API call failed: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error during API call: {str(e)}", exc_info=True)
+                # Record the error in AgentOps if span is available
+                if span:
+                    span.record_error(e)
+                raise LLMError(f"API call failed: {str(e)}")
 
-    error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"
-    if last_error:
-        error_msg += f". Last error: {str(last_error)}"
-    logger.error(error_msg, exc_info=True)
-    raise LLMRetryError(error_msg)
+        error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"
+        if last_error:
+            error_msg += f". Last error: {str(last_error)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # Record the final error in AgentOps if span is available
+        if span:
+            span.record_error(last_error or error_msg)
+        
+        raise LLMRetryError(error_msg)
 
 # Initialize API keys on module import
 setup_api_keys()

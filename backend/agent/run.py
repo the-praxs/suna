@@ -48,12 +48,19 @@ async def run_agent(
     agent_config: Optional[dict] = None,    
     trace: Optional[StatefulTraceClient] = None,
     is_agent_builder: Optional[bool] = False,
-    target_agent_id: Optional[str] = None
+    target_agent_id: Optional[str] = None,
+    agentops_trace = None  # AgentOps trace context
 ):
     """Run the development agent with specified configuration."""
     logger.info(f"🚀 Starting agent with model: {model_name}")
     if agent_config:
         logger.info(f"Using custom agent: {agent_config.get('name', 'Unknown')}")
+    
+    # Set AgentOps trace context for this async flow
+    if agentops_trace:
+        from services.agentops import agentops_trace_context
+        agentops_trace_context.set(agentops_trace)
+        logger.debug(f"AgentOps trace context set for thread {thread_id}")
 
     if not trace:
         trace = langfuse.trace(name="run_agent", session_id=thread_id, metadata={"project_id": project_id})

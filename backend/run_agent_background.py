@@ -14,9 +14,17 @@ from services.supabase import DBConnection
 from services import redis
 from dramatiq.brokers.rabbitmq import RabbitmqBroker
 import os
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
 from services.langfuse import langfuse
 from utils.retry import retry
-from services.agentops import start_agent_trace, end_agent_trace
+from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops
+
+# Initialize AgentOps for the worker after environment is loaded
+initialize_agentops()
 
 rabbitmq_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -37,6 +45,9 @@ async def initialize():
         instance_id = str(uuid.uuid4())[:8]
     await retry(lambda: redis.initialize_async())
     await db.initialize()
+    
+    # Initialize AgentOps in the worker context
+    initialize_agentops()
 
     _initialized = True
     logger.info(f"Initialized agent API with instance ID: {instance_id}")
@@ -164,7 +175,8 @@ async def run_agent_background(
             agent_config=agent_config,
             trace=trace,
             is_agent_builder=is_agent_builder,
-            target_agent_id=target_agent_id
+            target_agent_id=target_agent_id,
+            agentops_trace=agentops_trace  # Pass AgentOps trace context
         )
 
         final_status = "running"

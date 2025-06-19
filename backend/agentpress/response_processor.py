@@ -1318,39 +1318,58 @@ class ResponseProcessor:
     @agentops.tool
     async def _execute_tool(self, tool_call: Dict[str, Any]) -> ToolResult:
         """Execute a single tool call and return the result."""
-        span = self.trace.span(name=f"execute_tool.{tool_call['function_name']}", input=tool_call["arguments"])            
-        try:
-            function_name = tool_call["function_name"]
-            arguments = tool_call["arguments"]
+        # Use both Langfuse and AgentOps spans
+        span = self.trace.span(name=f"execute_tool.{tool_call['function_name']}", input=tool_call["arguments"])
+        
+        # Import AgentOps tool span
+        from services.agentops import tool_span
+        
+        async with tool_span(tool_call['function_name'], tool_call.get("arguments")) as agentops_span:
+            try:
+                function_name = tool_call["function_name"]
+                arguments = tool_call["arguments"]
 
-            logger.info(f"Executing tool: {function_name} with arguments: {arguments}")
-            self.trace.event(name="executing_tool", level="DEFAULT", status_message=(f"Executing tool: {function_name} with arguments: {arguments}"))
-            
-            if isinstance(arguments, str):
-                try:
-                    arguments = safe_json_parse(arguments)
-                except json.JSONDecodeError:
-                    arguments = {"text": arguments}
-            
-            # Get available functions from tool registry
-            available_functions = self.tool_registry.get_available_functions()
-            
-            # Look up the function by name
-            tool_fn = available_functions.get(function_name)
-            if not tool_fn:
-                logger.error(f"Tool function '{function_name}' not found in registry")
-                span.end(status_message="tool_not_found", level="ERROR")
-                return ToolResult(success=False, output=f"Tool function '{function_name}' not found")
-            
-            logger.debug(f"Found tool function for '{function_name}', executing...")
-            result = await tool_fn(**arguments)
-            logger.info(f"Tool execution complete: {function_name} -> {result}")
-            span.end(status_message="tool_executed", output=result)
-            return result
-        except Exception as e:
-            logger.error(f"Error executing tool {tool_call['function_name']}: {str(e)}", exc_info=True)
-            span.end(status_message="tool_execution_error", output=f"Error executing tool: {str(e)}", level="ERROR")
-            return ToolResult(success=False, output=f"Error executing tool: {str(e)}")
+                logger.info(f"Executing tool: {function_name} with arguments: {arguments}")
+                self.trace.event(name="executing_tool", level="DEFAULT", status_message=(f"Executing tool: {function_name} with arguments: {arguments}"))
+                
+                if isinstance(arguments, str):
+                    try:
+                        arguments = safe_json_parse(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"text": arguments}
+                
+                # Get available functions from tool registry
+                available_functions = self.tool_registry.get_available_functions()
+                
+                # Look up the function by name
+                tool_fn = available_functions.get(function_name)
+                if not tool_fn:
+                    logger.error(f"Tool function '{function_name}' not found in registry")
+                    span.end(status_message="tool_not_found", level="ERROR")
+                    error_result = ToolResult(success=False, output=f"Tool function '{function_name}' not found")
+                    if agentops_span:
+                        agentops_span.record_result(error_result)
+                    return error_result
+                
+                logger.debug(f"Found tool function for '{function_name}', executing...")
+                result = await tool_fn(**arguments)
+                logger.info(f"Tool execution complete: {function_name} -> {result}")
+                span.end(status_message="tool_executed", output=result)
+                
+                # Record result in AgentOps span
+                if agentops_span:
+                    agentops_span.record_result(result)
+                
+                return result
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_call['function_name']}: {str(e)}", exc_info=True)
+                span.end(status_message="tool_execution_error", output=f"Error executing tool: {str(e)}", level="ERROR")
+                
+                # Record error in AgentOps span
+                if agentops_span:
+                    agentops_span.record_error(e)
+                
+                return ToolResult(success=False, output=f"Error executing tool: {str(e)}")
 
     async def _execute_tools(
         self, 
