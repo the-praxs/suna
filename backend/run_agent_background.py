@@ -16,6 +16,7 @@ from dramatiq.brokers.rabbitmq import RabbitmqBroker
 import os
 from services.langfuse import langfuse
 from utils.retry import retry
+from services.agentops import start_agent_trace, end_agent_trace
 
 rabbitmq_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -128,6 +129,16 @@ async def run_agent_background(
             stop_signal_received = True # Stop the run if the checker fails
 
     trace = langfuse.trace(name="agent_run", id=agent_run_id, session_id=thread_id, metadata={"project_id": project_id, "instance_id": instance_id})
+    
+    # Start AgentOps trace
+    agentops_trace = start_agent_trace(
+        agent_run_id=agent_run_id,
+        thread_id=thread_id,
+        project_id=project_id,
+        model_name=model_name,
+        agent_config=agent_config
+    )
+    
     try:
         # Setup Pub/Sub listener for control signals
         pubsub = await redis.create_pubsub()
@@ -276,6 +287,14 @@ async def run_agent_background(
             await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
+        
+        # End AgentOps trace
+        if agentops_trace:
+            end_agent_trace(
+                trace_context=agentops_trace,
+                status=final_status,
+                error=error_message
+            )
 
         logger.info(f"Agent run background task fully completed for: {agent_run_id} (Instance: {instance_id}) with final status: {final_status}")
 

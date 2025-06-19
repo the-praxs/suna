@@ -18,9 +18,15 @@ from openai import OpenAIError
 import litellm
 from utils.logger import logger
 from utils.config import config
+import agentops
+from services.agentops import get_current_trace_context, is_initialized as agentops_is_initialized
+from services.agentops_litellm_callback import agentops_callback
 
 # litellm.set_verbose=True
 litellm.modify_params=True
+
+# Configure LiteLLM callbacks
+litellm.callbacks = []
 
 # Constants
 MAX_RETRIES = 2
@@ -44,6 +50,7 @@ def setup_api_keys() -> None:
             logger.debug(f"API key set for provider: {provider}")
         else:
             logger.warning(f"No API key found for provider: {provider}")
+    
 
     # Set up OpenRouter API base if not already set
     if config.OPENROUTER_API_KEY and config.OPENROUTER_API_BASE:
@@ -239,6 +246,13 @@ def prepare_params(
 
     return params
 
+def ensure_agentops_callback():
+    """Ensure AgentOps callback is registered with LiteLLM if AgentOps is initialized."""
+    if agentops_is_initialized() and agentops_callback not in litellm.callbacks:
+        litellm.callbacks.append(agentops_callback)
+        logger.debug("AgentOps callback registered with LiteLLM")
+
+@agentops.task
 async def make_llm_api_call(
     messages: List[Dict[str, Any]],
     model_name: str,
@@ -281,6 +295,9 @@ async def make_llm_api_call(
         LLMRetryError: If API call fails after retries
         LLMError: For other API-related errors
     """
+    # Ensure AgentOps callback is registered
+    ensure_agentops_callback()
+    
     # debug <timestamp>.json messages
     logger.info(f"Making LLM API call to model: {model_name} (Thinking: {enable_thinking}, Effort: {reasoning_effort})")
     logger.info(f"📡 API Call: Using model {model_name}")

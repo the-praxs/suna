@@ -26,6 +26,7 @@ from agentpress.utils.json_helpers import (
     to_json_string, format_for_yield
 )
 from litellm import token_counter
+import agentops
 
 # Type alias for XML result adding strategy
 XmlAddingStrategy = Literal["user_message", "assistant_message", "inline_edit"]
@@ -1314,6 +1315,7 @@ class ResponseProcessor:
         return parsed_data
 
     # Tool execution methods
+    @agentops.tool
     async def _execute_tool(self, tool_call: Dict[str, Any]) -> ToolResult:
         """Execute a single tool call and return the result."""
         span = self.trace.span(name=f"execute_tool.{tool_call['function_name']}", input=tool_call["arguments"])            
