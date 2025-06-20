@@ -293,7 +293,7 @@ def _extract_content_from_structured_format(content):
     """
     Extract text content from message content.
     For strings: return as-is
-    For lists: extract text from first item with type='text'
+    For lists: extract text from ALL items with type='text' and concatenate
     """
     # If content is a string that looks like a list, try to parse it
     if isinstance(content, str) and content.strip().startswith("["):
@@ -306,14 +306,21 @@ def _extract_content_from_structured_format(content):
                 # If parsing fails, return as-is
                 return content
     
-    # If content is a list, get the text from the first item
+    # If content is a list, concatenate ALL text items (not just the first)
     if isinstance(content, list) and len(content) > 0:
-        first_item = content[0]
-        if isinstance(first_item, dict) and first_item.get("type") == "text":
-            return first_item.get("text", "")
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text", "")
+                text_parts.append(text)
+        
+        if text_parts:
+            return "\n".join(text_parts)
+        else:
+            return ""
     
     # Return content as-is (string or other)
-    return content
+    return str(content) if not isinstance(content, str) else content
 
 
 @asynccontextmanager
@@ -394,10 +401,12 @@ async def llm_span(
             if "role" in msg:
                 attributes[f"{prefix}.role"] = msg["role"]
             if "content" in msg:
-                content = _extract_content_from_structured_format(msg["content"])
-                # Limit content size to avoid huge spans
-                attributes[f"{prefix}.content"] = content[:10000]
-    
+                raw_content = msg["content"]
+                content = _extract_content_from_structured_format(raw_content)
+                
+                # Store the full content for all messages without truncation
+                attributes[f"{prefix}.content"] = content
+                
     # Add tools/functions if present
     if tools:
         for i, tool in enumerate(tools):
@@ -458,9 +467,9 @@ async def llm_span(
                         completion = _extract_content_from_structured_format(raw_content)
                         
                         if completion:
-                            # Use the semantic convention for completions
+                            # Use the semantic convention for completions - store full content without truncation
                             self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant")
-                            self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.content", completion[:10000])
+                            self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.content", completion)
                         
                         # Track tool calls if present
                         if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
