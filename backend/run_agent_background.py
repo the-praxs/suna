@@ -21,7 +21,7 @@ load_dotenv()
 
 from services.langfuse import langfuse
 from utils.retry import retry
-from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops
+from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops, flush_trace
 
 # Initialize AgentOps for the worker after environment is loaded
 initialize_agentops()
@@ -169,14 +169,44 @@ async def run_agent_background(
         agent_config=agent_config
     )
     
+    # Initialize pending_redis_operations before try block
+    pending_redis_operations = []
+    
     try:
         # Setup Pub/Sub listener for control signals
         pubsub = await redis.create_pubsub()
+        
+        # Create a span for Redis subscription
+        from agentops.sdk.core import tracer
+        from agentops.semconv import SpanKind
+        
+        redis_span = None
+        if tracer.initialized:
+            redis_span, _, _ = tracer.make_span(
+                "redis_subscription_setup",
+                SpanKind.OPERATION,
+                attributes={
+                    "operation.name": "redis_subscription",
+                    "redis.channels": [instance_control_channel, global_control_channel],
+                    "redis.agent_run_id": agent_run_id
+                }
+            )
+        
         try:
             await retry(lambda: pubsub.subscribe(instance_control_channel, global_control_channel))
+            if redis_span:
+                redis_span.set_attribute("redis.subscription_success", True)
         except Exception as e:
             logger.error(f"Redis failed to subscribe to control channels: {e}", exc_info=True)
+            if redis_span:
+                redis_span.set_attribute("redis.subscription_success", False)
+                redis_span.record_exception(e)
+                from opentelemetry.trace import Status, StatusCode
+                redis_span.set_status(Status(StatusCode.ERROR, str(e)))
             raise e
+        finally:
+            if redis_span:
+                redis_span.end()
 
         logger.debug(f"Subscribed to control channels: {instance_control_channel}, {global_control_channel}")
         stop_checker = asyncio.create_task(check_for_stop_signal())
@@ -200,8 +230,6 @@ async def run_agent_background(
 
         final_status = "running"
         error_message = None
-
-        pending_redis_operations = []
 
         async for response in agent_gen:
             if stop_signal_received:
@@ -314,13 +342,17 @@ async def run_agent_background(
         await _cleanup_redis_run_lock(agent_run_id)
 
         # Wait for all pending redis operations to complete, with timeout
-        try:
-            await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
+        if pending_redis_operations:
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
         
-        # End AgentOps trace
+        # Flush and end AgentOps trace
         if agentops_trace:
+            # Flush pending spans before ending
+            await flush_trace()
+            
             end_agent_trace(
                 trace_context=agentops_trace,
                 status=final_status,

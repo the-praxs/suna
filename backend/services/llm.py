@@ -305,15 +305,16 @@ async def make_llm_api_call(
         reasoning_effort=reasoning_effort
     )
     
-    # Use AgentOps LLM span context manager
-    with llm_span(
+    # Use AgentOps LLM span async context manager
+    async with llm_span(
         model=model_name,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
         tools=tools,
         top_p=top_p,
-        stream=stream
+        stream=stream,
+        reasoning_effort=reasoning_effort if enable_thinking else None
     ) as span:
         last_error = None
         for attempt in range(MAX_RETRIES):
