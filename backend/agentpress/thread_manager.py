@@ -69,10 +69,12 @@ class ThreadManager:
         content = msg['content']
         if isinstance(content, str) and "ToolResult" in content: return True
         if isinstance(content, dict) and "tool_execution" in content: return True
+        if isinstance(content, dict) and "interactive_elements" in content: return True
         if isinstance(content, str):
             try:
                 parsed_content = json.loads(content)
                 if isinstance(parsed_content, dict) and "tool_execution" in parsed_content: return True
+                if isinstance(parsed_content, dict) and "interactive_elements" in content: return True
             except (json.JSONDecodeError, TypeError):
                 pass
         return False
@@ -249,7 +251,7 @@ class ThreadManager:
             logger.warning(f"Further token compression is needed: {compressed_token_count} > {max_tokens}")
             result = self._compress_messages(messages, llm_model, max_tokens, int(token_threshold / 2), max_iterations - 1)
 
-        return result
+        return self._middle_out_messages(result)
     
     def _compress_messages_by_omitting_messages(
             self, 
@@ -321,6 +323,17 @@ class ThreadManager:
         logger.info(f"_compress_messages_by_omitting_messages: {initial_token_count} -> {final_token_count} tokens ({len(messages)} -> {len(final_messages)} messages)")
             
         return final_messages
+    
+    def _middle_out_messages(self, messages: List[Dict[str, Any]], max_messages: int = 320) -> List[Dict[str, Any]]:
+        """Remove messages from the middle of the list, keeping max_messages total."""
+        if len(messages) <= max_messages:
+            return messages
+        
+        # Keep half from the beginning and half from the end
+        keep_start = max_messages // 2
+        keep_end = max_messages - keep_start
+        
+        return messages[:keep_start] + messages[-keep_end:]
 
 
     def add_tool(self, tool_class: Type[Tool], function_names: Optional[List[str]] = None, **kwargs):
