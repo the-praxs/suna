@@ -296,15 +296,16 @@ def _extract_content_from_structured_format(content):
     For lists: extract text from ALL items with type='text' and concatenate
     """
     # If content is a string that looks like a list, try to parse it
-    if isinstance(content, str) and content.strip().startswith("["):
-        try:
-            content = json.loads(content)
-        except:
+    if isinstance(content, str):
+        if content.strip().startswith("["):
             try:
-                content = ast.literal_eval(content)
+                content = json.loads(content)
             except:
-                # If parsing fails, return as-is
-                return content
+                try:
+                    content = ast.literal_eval(content)
+                except:
+                    # If parsing fails, return as-is
+                    return content
     
     # If content is a list, concatenate ALL text items (not just the first)
     if isinstance(content, list) and len(content) > 0:
