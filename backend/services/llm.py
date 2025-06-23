@@ -132,6 +132,10 @@ def prepare_params(
             # "anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15"
             "anthropic-beta": "output-128k-2025-02-19"
         }
+        params["fallbacks"] = [{
+            "model": "openrouter/anthropic/claude-sonnet-4",
+            "messages": messages,
+        }]
         logger.debug("Added Claude-specific headers")
 
     # Add OpenRouter-specific parameters
