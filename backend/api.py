@@ -47,8 +47,12 @@ async def lifespan(app: FastAPI):
     try:
         await db.initialize()
         
-        # Initialize AgentOps
-        initialize_agentops()
+        # Initialize AgentOps in the main API context
+        try:
+            initialize_agentops()
+            logger.info("AgentOps initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize AgentOps: {e}")
         
         agent_api.initialize(
             db,

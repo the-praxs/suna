@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from services.langfuse import langfuse
+from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops, flush_trace
 from utils.retry import retry
 from workflows.executor import WorkflowExecutor
 from workflows.deterministic_executor import DeterministicWorkflowExecutor
@@ -27,10 +28,12 @@ from workflows.models import WorkflowDefinition
 import sentry_sdk
 from typing import Dict, Any
 
-from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops, flush_trace
-
 # Initialize AgentOps for the worker after environment is loaded
-initialize_agentops()
+try:
+    initialize_agentops()
+    logger.info("AgentOps initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize AgentOps: {e}")
 
 rabbitmq_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
