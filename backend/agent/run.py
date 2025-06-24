@@ -31,7 +31,7 @@ from services.langfuse import langfuse
 from agent.gemini_prompt import get_gemini_system_prompt
 from agent.tools.mcp_tool_wrapper import MCPToolWrapper
 from agentpress.tool import SchemaType
-from agentops.semconv import AgentAttributes, SpanAttributes
+from agentops.semconv import AgentAttributes
 import agentops
 from services.agentops import record_event
 
@@ -53,7 +53,7 @@ async def run_agent(
     trace: Optional[StatefulTraceClient] = None,
     is_agent_builder: Optional[bool] = False,
     target_agent_id: Optional[str] = None,
-    agentops_trace = None  # AgentOps trace context
+    agentops_trace = None
 ):
     """Run the development agent with specified configuration."""
     logger.info(f"🚀 Starting agent with model: {model_name}")
@@ -452,7 +452,7 @@ async def run_agent(
                                 "format": "image/jpeg"
                             }
                         })
-                        trace.event(name="screenshot_url_added_to_temporary_message", level="DEFAULT", status_message=(f"Screenshot URL added to temporary message."))
+                        trace.event(name="screenshot_url_added_to_temporary_message", level="DEFAULT", status_message=("Screenshot URL added to temporary message."))
                         record_event(name="screenshot_url_added_to_temporary_message", level="DEFAULT", message="Screenshot URL added to temporary message.")
                     elif screenshot_base64:
                         # Fallback to base64 if URL not available
@@ -462,20 +462,20 @@ async def run_agent(
                                 "url": f"data:image/jpeg;base64,{screenshot_base64}",
                             }
                         })
-                        trace.event(name="screenshot_base64_added_to_temporary_message", level="WARNING", status_message=(f"Screenshot base64 added to temporary message. Prefer screenshot_url if available."))
+                        trace.event(name="screenshot_base64_added_to_temporary_message", level="WARNING", status_message=("Screenshot base64 added to temporary message. Prefer screenshot_url if available."))
                         record_event(name="screenshot_base64_added_to_temporary_message", level="WARNING", message="Screenshot base64 added to temporary message. Prefer screenshot_url if available.")
                     else:
                         logger.warning("Browser state found but no screenshot data.")
-                        trace.event(name="browser_state_found_but_no_screenshot_data", level="WARNING", status_message=(f"Browser state found but no screenshot data."))
+                        trace.event(name="browser_state_found_but_no_screenshot_data", level="WARNING", status_message=("Browser state found but no screenshot data."))
                         record_event(name="browser_state_found_but_no_screenshot_data", level="WARNING", message="Browser state found but no screenshot data.")
                 else:
                     logger.warning("Model is Gemini, Anthropic, or OpenAI, so not adding screenshot to temporary message.")
-                    trace.event(name="model_is_gemini_anthropic_or_openai", level="WARNING", status_message=(f"Model is Gemini, Anthropic, or OpenAI, so not adding screenshot to temporary message."))
+                    trace.event(name="model_is_gemini_anthropic_or_openai", level="WARNING", status_message=("Model is Gemini, Anthropic, or OpenAI, so not adding screenshot to temporary message."))
                     record_event(name="model_is_gemini_anthropic_or_openai", level="WARNING", message="Model is Gemini, Anthropic, or OpenAI, so not adding screenshot to temporary message.")
 
             except Exception as e:
                 logger.error(f"Error parsing browser state: {e}")
-                trace.event(name="error_parsing_browser_state", level="ERROR", status_message=(f"{e}"))
+                trace.event(name="error_parsing_browser_state", level="ERROR", status_message=(str(e)))
                 record_event(name="error_parsing_browser_state", level="ERROR", message=str(e))
                 if browser_span:
                     browser_span.record_exception(e)
@@ -511,7 +511,7 @@ async def run_agent(
                 await client.table('messages').delete().eq('message_id', latest_image_context_msg.data[0]["message_id"]).execute()
             except Exception as e:
                 logger.error(f"Error parsing image context: {e}")
-                trace.event(name="error_parsing_image_context", level="ERROR", status_message=(f"{e}"))
+                trace.event(name="error_parsing_image_context", level="ERROR", status_message=(str(e)))
                 record_event(name="error_parsing_image_context", level="ERROR", message=str(e))
 
         # If we have any content, construct the temporary_message
@@ -559,7 +559,7 @@ async def run_agent(
 
             if isinstance(response, dict) and "status" in response and response["status"] == "error":
                 logger.error(f"Error response from run_thread: {response.get('message', 'Unknown error')}")
-                trace.event(name="error_response_from_run_thread", level="ERROR", status_message=(f"{response.get('message', 'Unknown error')}"))
+                trace.event(name="error_response_from_run_thread", level="ERROR", status_message=(response.get('message', 'Unknown error')))
                 record_event(name="error_response_from_run_thread", level="ERROR", message=response.get('message', 'Unknown error'))
                 yield response
                 break
@@ -576,7 +576,7 @@ async def run_agent(
                     # If we receive an error chunk, we should stop after this iteration
                     if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
                         logger.error(f"Error chunk detected: {chunk.get('message', 'Unknown error')}")
-                        trace.event(name="error_chunk_detected", level="ERROR", status_message=(f"{chunk.get('message', 'Unknown error')}"))
+                        trace.event(name="error_chunk_detected", level="ERROR", status_message=(chunk.get('message', 'Unknown error')))
                         record_event(name="error_chunk_detected", level="ERROR", message=chunk.get('message', 'Unknown error'))
                         error_detected = True
                         yield chunk  # Forward the error chunk
@@ -635,25 +635,25 @@ async def run_agent(
                             full_response += assistant_text
                             if isinstance(assistant_text, str) and assistant_text:
                                 if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
-                                   if '</ask>' in assistant_text:
-                                       xml_tool = 'ask'
-                                   elif '</complete>' in assistant_text:
-                                       xml_tool = 'complete'
-                                   elif '</web-browser-takeover>' in assistant_text:
-                                       xml_tool = 'web-browser-takeover'
+                                    if '</ask>' in assistant_text:
+                                        xml_tool = 'ask'
+                                    elif '</complete>' in assistant_text:
+                                        xml_tool = 'complete'
+                                    elif '</web-browser-takeover>' in assistant_text:
+                                        xml_tool = 'web-browser-takeover'
 
-                                   last_tool_call = xml_tool
-                                   logger.info(f"Agent used XML tool: {xml_tool}")
-                                   trace.event(name="agent_used_xml_tool", level="DEFAULT", status_message=(f"Agent used XML tool: {xml_tool}"))
-                                   record_event(name="agent_used_xml_tool", level="DEFAULT", message=f"Agent used XML tool: {xml_tool}")
+                                    last_tool_call = xml_tool
+                                    logger.info(f"Agent used XML tool: {xml_tool}")
+                                    trace.event(name="agent_used_xml_tool", level="DEFAULT", status_message=f"Agent used XML tool: {xml_tool}")
+                                    record_event(name="agent_used_xml_tool", level="DEFAULT", message=f"Agent used XML tool: {xml_tool}")
                         except json.JSONDecodeError:
                             # Handle cases where content might not be valid JSON
                             logger.warning(f"Warning: Could not parse assistant content JSON: {chunk.get('content')}")
-                            trace.event(name="warning_could_not_parse_assistant_content_json", level="WARNING", status_message=(f"Warning: Could not parse assistant content JSON: {chunk.get('content')}"))
+                            trace.event(name="warning_could_not_parse_assistant_content_json", level="WARNING", status_message=f"Warning: Could not parse assistant content JSON: {chunk.get('content')}")
                             record_event(name="warning_could_not_parse_assistant_content_json", level="WARNING", message=f"Warning: Could not parse assistant content JSON: {chunk.get('content')}")
                         except Exception as e:
                             logger.error(f"Error processing assistant chunk: {e}")
-                            trace.event(name="error_processing_assistant_chunk", level="ERROR", status_message=(f"Error processing assistant chunk: {e}"))
+                            trace.event(name="error_processing_assistant_chunk", level="ERROR", status_message=f"Error processing assistant chunk: {e}")
                             record_event(name="error_processing_assistant_chunk", level="ERROR", message=f"Error processing assistant chunk: {e}")
 
                     yield chunk
@@ -661,14 +661,14 @@ async def run_agent(
                 # Check if we should stop based on the last tool call or error
                 if error_detected:
                     logger.info(f"Stopping due to error detected in response")
-                    trace.event(name="stopping_due_to_error_detected_in_response", level="DEFAULT", status_message=(f"Stopping due to error detected in response"))
+                    trace.event(name="stopping_due_to_error_detected_in_response", level="DEFAULT", status_message=("Stopping due to error detected in response"))
                     record_event(name="stopping_due_to_error_detected_in_response", level="DEFAULT", message="Stopping due to error detected in response")
                     generation.end(output=full_response, status_message="error_detected", level="ERROR")
                     break
                     
                 if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
                     logger.info(f"Agent decided to stop with tool: {last_tool_call}")
-                    trace.event(name="agent_decided_to_stop_with_tool", level="DEFAULT", status_message=(f"Agent decided to stop with tool: {last_tool_call}"))
+                    trace.event(name="agent_decided_to_stop_with_tool", level="DEFAULT", status_message=f"Agent decided to stop with tool: {last_tool_call}")
                     record_event(name="agent_decided_to_stop_with_tool", level="DEFAULT", message=f"Agent decided to stop with tool: {last_tool_call}")
                     generation.end(output=full_response, status_message="agent_stopped")
                     continue_execution = False
@@ -677,7 +677,7 @@ async def run_agent(
                 # Just log the error and re-raise to stop all iterations
                 error_msg = f"Error during response streaming: {str(e)}"
                 logger.error(f"Error: {error_msg}")
-                trace.event(name="error_during_response_streaming", level="ERROR", status_message=(f"Error during response streaming: {str(e)}"))
+                trace.event(name="error_during_response_streaming", level="ERROR", status_message=f"Error during response streaming: {str(e)}")
                 record_event(name="error_during_response_streaming", level="ERROR", message=f"Error during response streaming: {str(e)}")
                 generation.end(output=full_response, status_message=error_msg, level="ERROR")
                 yield {
@@ -692,7 +692,7 @@ async def run_agent(
             # Just log the error and re-raise to stop all iterations
             error_msg = f"Error running thread: {str(e)}"
             logger.error(f"Error: {error_msg}")
-            trace.event(name="error_running_thread", level="ERROR", status_message=(f"Error running thread: {str(e)}"))
+            trace.event(name="error_running_thread", level="ERROR", status_message=f"Error running thread: {str(e)}")
             record_event(name="error_running_thread", level="ERROR", message=f"Error running thread: {str(e)}")
             yield {
                 "type": "status",

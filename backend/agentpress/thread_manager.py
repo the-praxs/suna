@@ -26,7 +26,6 @@ from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
 from litellm import token_counter
-import agentops
 from services.agentops import record_event, agentops_trace_context
 
 # Type alias for tool choice
@@ -878,7 +877,7 @@ Here are the XML tools available with examples:
                                         continue
                                 elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
                                     # Don't auto-continue if XML tool limit was reached
-                                    logger.info(f"Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
+                                    logger.info("Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
                                     record_event(
                                         name="auto_continue_stopped",
                                         level="WARNING",
