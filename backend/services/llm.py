@@ -345,7 +345,7 @@ async def make_llm_api_call(
                 # Record the error in AgentOps if span is available
                 if span:
                     span.record_error(e)
-                raise LLMError(f"API call failed: {str(e)}")
+                raise LLMError(f"API call failed: {str(e)}") from e
 
         error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"
         if last_error:
