@@ -26,7 +26,9 @@ from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
 from litellm import token_counter
-from services.agentops import record_event, agentops_trace_context
+from services.agentops import record_event, agentops_trace_context, get_current_trace_context
+from agentops import tracer
+from agentops.semconv import SpanKind, SpanAttributes
 
 # Type alias for tool choice
 ToolChoice = Literal["auto", "required", "none"]
@@ -225,11 +227,6 @@ class ThreadManager:
         """Compress the messages.
             token_threshold: must be a power of 2
         """
-        # Import AgentOps tracing utilities
-        from services.agentops import get_current_trace_context
-        from agentops.sdk.core import tracer
-        from agentops.semconv import SpanKind, SpanAttributes
-        
         # Create a span for message compression only if we have a trace context
         span = None
         trace_context = get_current_trace_context()

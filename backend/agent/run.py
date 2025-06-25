@@ -4,7 +4,6 @@ import re
 from uuid import uuid4
 from typing import Optional
 
-# from agent.tools.message_tool import MessageTool
 from agent.tools.message_tool import MessageTool
 from agent.tools.sb_deploy_tool import SandboxDeployTool
 from agent.tools.sb_expose_tool import SandboxExposeTool
@@ -27,13 +26,14 @@ from services.billing import check_billing_status
 from agent.tools.sb_vision_tool import SandboxVisionTool
 from services.langfuse import langfuse
 from langfuse.client import StatefulTraceClient
-from services.langfuse import langfuse
 from agent.gemini_prompt import get_gemini_system_prompt
 from agent.tools.mcp_tool_wrapper import MCPToolWrapper
 from agentpress.tool import SchemaType
-from agentops.semconv import AgentAttributes
+from agentops.semconv import AgentAttributes, SpanKind, CoreAttributes
+from agentops import tracer, StatusCode
 import agentops
-from services.agentops import record_event
+from services.agentops import record_event, agentops_trace_context
+from opentelemetry.trace.status import Status
 
 load_dotenv()
 
@@ -62,7 +62,6 @@ async def run_agent(
     
     # Set AgentOps trace context for this async flow
     if agentops_trace:
-        from services.agentops import agentops_trace_context
         agentops_trace_context.set(agentops_trace)
         logger.debug(f"AgentOps trace context set for thread {thread_id}")
         
@@ -186,9 +185,6 @@ async def run_agent(
             
             if mcp_wrapper_instance:
                 # Create a span for MCP tool registration
-                from agentops.sdk.core import tracer
-                from agentops.semconv import SpanKind, CoreAttributes
-                
                 mcp_span = None
                 if tracer.initialized:
                     mcp_span, _, _ = tracer.make_span(
@@ -233,7 +229,6 @@ async def run_agent(
                     if mcp_span:
                         mcp_span.set_attribute("mcp.registration_success", False)
                         mcp_span.record_exception(e)
-                        from opentelemetry.trace import Status, StatusCode
                         mcp_span.set_status(Status(StatusCode.ERROR, str(e)))
                     # Continue without MCP tools if initialization fails
                 finally:
@@ -401,9 +396,6 @@ async def run_agent(
         latest_browser_state_msg = await client.table('messages').select('*').eq('thread_id', thread_id).eq('type', 'browser_state').order('created_at', desc=True).limit(1).execute()
         if latest_browser_state_msg.data and len(latest_browser_state_msg.data) > 0:
             # Create a span for browser state processing
-            from agentops.sdk.core import tracer
-            from agentops.semconv import SpanKind, CoreAttributes
-            
             browser_span = None
             if tracer.initialized:
                 browser_span, _, _ = tracer.make_span(
@@ -479,7 +471,6 @@ async def run_agent(
                 record_event(name="error_parsing_browser_state", level="ERROR", message=str(e))
                 if browser_span:
                     browser_span.record_exception(e)
-                    from opentelemetry.trace import Status, StatusCode
                     browser_span.set_status(Status(StatusCode.ERROR, str(e)))
             finally:
                 if browser_span:

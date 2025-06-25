@@ -12,6 +12,7 @@ import json
 import re
 import uuid
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple, Union, Callable, Literal
 from dataclasses import dataclass
@@ -22,12 +23,12 @@ from agentpress.xml_tool_parser import XMLToolParser
 from langfuse.client import StatefulTraceClient
 from services.langfuse import langfuse
 from agentpress.utils.json_helpers import (
-    ensure_dict, ensure_list, safe_json_parse, 
+    ensure_dict, ensure_list, safe_json_parse,
     to_json_string, format_for_yield
 )
 from litellm import token_counter
-import agentops
-from services.agentops import record_event
+from services.agentops import record_event, tool_span
+from agentops.semconv import ToolAttributes, SpanAttributes, ToolStatus
 
 # Type alias for XML result adding strategy
 XmlAddingStrategy = Literal["user_message", "assistant_message", "inline_edit"]
@@ -1366,11 +1367,6 @@ class ResponseProcessor:
         """Execute a single tool call and return the result."""
         # Use both Langfuse and AgentOps spans
         span = self.trace.span(name=f"execute_tool.{tool_call['function_name']}", input=tool_call["arguments"])
-        
-        # Import AgentOps tool span and semantic conventions
-        from services.agentops import tool_span
-        from agentops.semconv import ToolAttributes, SpanAttributes, ToolStatus
-        import time
         
         start_time = time.time()
         

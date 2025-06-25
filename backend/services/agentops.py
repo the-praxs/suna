@@ -7,9 +7,11 @@ import json
 import ast
 from typing import Optional, Any, Dict
 import agentops
-from agentops import TraceContext
+from agentops import StatusCode, TraceContext, tracer
+from agentops.semconv import SpanKind, SpanAttributes
+from opentelemetry.trace.status import Status
 from utils.logger import logger
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager
 import contextvars
 import time
 import asyncio
@@ -47,9 +49,9 @@ def initialize_agentops():
         agentops.init(
             api_key=api_key,
             log_level=log_level,
-            instrument_llm_calls=False,  # Disable automatic LLM instrumentation - we handle it manually
+            instrument_llm_calls=False, # Disable automatic LLM instrumentation - we handle it manually
             auto_start_session=False,   # We'll manage traces manually
-            fail_safe=True,            # Don't crash if AgentOps has issues
+            fail_safe=True,             # Don't crash if AgentOps has issues
         )
         _initialized = True
         logger.info("AgentOps initialized successfully")
@@ -96,9 +98,6 @@ def start_agent_trace(
         agentops_trace_context.set(conversation_trace)
         
         # Create agent run span within the conversation trace
-        from agentops.sdk.core import tracer
-        from agentops.semconv import SpanKind, SpanAttributes
-        
         logger.debug(f"Tracer initialized: {tracer.initialized}")
         
         if tracer.initialized:
@@ -139,6 +138,152 @@ def start_agent_trace(
         return None
 
 
+class ToolSpanContext:
+    """Context for tool execution spans."""
+    
+    def __init__(self, span, start_time):
+        self.span = span
+        self.start_time = start_time
+        
+    def record_result(self, result):
+        """Record the tool result to the span."""
+        try:
+            if hasattr(result, 'success'):
+                self.span.set_attribute("tool.success", result.success)
+            if hasattr(result, 'output'):
+                # Limit output size to avoid huge spans
+                output_str = str(result.output)[:5000]
+                self.span.set_attribute("tool.output", output_str)
+            
+            # Add timing
+            duration_ms = (time.time() - self.start_time) * 1000
+            self.span.set_attribute("tool.duration_ms", duration_ms)
+        except Exception as e:
+            logger.error(f"Failed to record tool result: {e}")
+            
+    def record_error(self, error):
+        """Record an error that occurred during tool execution."""
+        try:
+            self.span.set_status(Status(StatusCode.ERROR, str(error)))
+            self.span.record_exception(error)
+            self.span.set_attribute("error.message", str(error))
+            self.span.set_attribute("tool.success", False)
+        except Exception as e:
+            logger.error(f"Failed to record tool error: {e}")
+
+
+class LLMSpanContext:
+    """Context for LLM call spans."""
+    
+    def __init__(self, span, start_time):
+        self.span = span
+        self.start_time = start_time
+        
+    def record_response(self, response):
+        """Record the LLM response to the span."""
+        try:
+            # Update span with response data following semantic conventions
+            if hasattr(response, "choices") and response.choices:
+                choice = response.choices[0]
+                
+                # Response model (might be different from request)
+                if hasattr(response, "model"):
+                    self.span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL, response.model)
+                
+                # Finish reason
+                if hasattr(choice, "finish_reason"):
+                    self.span.set_attribute(SpanAttributes.LLM_RESPONSE_FINISH_REASON, choice.finish_reason)
+                
+                # Response ID
+                if hasattr(response, "id"):
+                    self.span.set_attribute(SpanAttributes.LLM_RESPONSE_ID, response.id)
+                
+                # System fingerprint (OpenAI specific)
+                if hasattr(response, "system_fingerprint") and response.system_fingerprint:
+                    self.span.set_attribute(SpanAttributes.LLM_OPENAI_RESPONSE_SYSTEM_FINGERPRINT, response.system_fingerprint)
+                
+                # Stop reason (for some models)
+                if hasattr(choice, "stop_reason") and choice.stop_reason:
+                    self.span.set_attribute(SpanAttributes.LLM_RESPONSE_STOP_REASON, choice.stop_reason)
+                
+                if hasattr(choice, "message"):
+                    # Extract and set completion following semantic convention
+                    raw_content = choice.message.content if hasattr(choice.message, "content") else str(choice.message)
+                    completion = _extract_content_from_structured_format(raw_content)
+                    
+                    if completion:
+                        # Use the semantic convention for completions - store full content without truncation
+                        self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant")
+                        self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.content", completion)
+                    
+                    # Track tool calls if present
+                    if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
+                        for i, tc in enumerate(choice.message.tool_calls):
+                            prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls.{i}"
+                            self.span.set_attribute(f"{prefix}.id", tc.id if hasattr(tc, "id") else "")
+                            if hasattr(tc, "function"):
+                                self.span.set_attribute(f"{prefix}.name", tc.function.name)
+                                self.span.set_attribute(f"{prefix}.arguments", tc.function.arguments[:500])
+            
+            # Add usage data following semantic conventions
+            if hasattr(response, "usage") and response.usage:
+                # Basic token counts
+                if hasattr(response.usage, "prompt_tokens") and response.usage.prompt_tokens is not None:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS, response.usage.prompt_tokens)
+                if hasattr(response.usage, "completion_tokens") and response.usage.completion_tokens is not None:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, response.usage.completion_tokens)
+                if hasattr(response.usage, "total_tokens") and response.usage.total_tokens is not None:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, response.usage.total_tokens)
+                else:
+                    # Calculate total if not provided
+                    prompt_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+                    completion_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+                    total = prompt_tokens + completion_tokens
+                    if total > 0:
+                        self.span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total)
+                
+                # Additional usage attributes
+                if hasattr(response.usage, "reasoning_tokens") and response.usage.reasoning_tokens:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_REASONING_TOKENS, response.usage.reasoning_tokens)
+                if hasattr(response.usage, "cache_creation_input_tokens") and response.usage.cache_creation_input_tokens:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS, response.usage.cache_creation_input_tokens)
+                if hasattr(response.usage, "cache_read_input_tokens") and response.usage.cache_read_input_tokens:
+                    self.span.set_attribute(SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS, response.usage.cache_read_input_tokens)
+            
+            
+            # Set successful status
+            self.span.set_status(Status(StatusCode.OK))
+            
+        except Exception as e:
+            logger.error(f"Failed to record LLM response: {e}")
+    
+    def record_streaming_metrics(self, time_to_first_token: Optional[float] = None,
+                                chunk_count: Optional[int] = None):
+        """Record streaming-specific metrics."""
+        try:
+            if time_to_first_token is not None:
+                self.span.set_attribute(SpanAttributes.LLM_STREAMING_TIME_TO_FIRST_TOKEN, time_to_first_token)
+            
+            if chunk_count is not None:
+                self.span.set_attribute(SpanAttributes.LLM_STREAMING_CHUNK_COUNT, chunk_count)
+            
+            # Calculate total streaming duration
+            duration_ms = (time.time() - self.start_time) * 1000
+            self.span.set_attribute(SpanAttributes.LLM_STREAMING_DURATION, duration_ms)
+            
+        except Exception as e:
+            logger.error(f"Failed to record streaming metrics: {e}")
+            
+    def record_error(self, error):
+        """Record an error that occurred during the LLM call."""
+        try:
+            self.span.set_status(Status(StatusCode.ERROR, str(error)))
+            self.span.record_exception(error)
+            self.span.set_attribute("error.message", str(error))
+        except Exception as e:
+            logger.error(f"Failed to record LLM error: {e}")
+
+
 def end_agent_trace(
     trace_context: Optional[TraceContext] = None,
     status: str = "completed",
@@ -169,7 +314,6 @@ def end_agent_trace(
             span = context._agent_run_span
             
             # Set status on the span
-            from opentelemetry.trace import Status, StatusCode
             if status == "completed":
                 span.set_status(Status(StatusCode.OK))
             elif status in ["failed", "stopped"]:
@@ -216,11 +360,6 @@ async def tool_span(tool_name: str, tool_args: Optional[Dict[str, Any]] = None):
         yield None
         return
     
-    # Get the tracer from AgentOps
-    from agentops.sdk.core import tracer
-    from agentops.semconv import SpanKind, SpanAttributes
-    from opentelemetry.trace import Status, StatusCode
-    
     if not tracer.initialized:
         yield None
         return
@@ -248,39 +387,8 @@ async def tool_span(tool_name: str, tool_args: Optional[Dict[str, Any]] = None):
     
     start_time = time.time()
     
-    class ToolSpanContext:
-        def __init__(self, span):
-            self.span = span
-            self.start_time = start_time
-            
-        def record_result(self, result):
-            """Record the tool result to the span."""
-            try:
-                if hasattr(result, 'success'):
-                    self.span.set_attribute("tool.success", result.success)
-                if hasattr(result, 'output'):
-                    # Limit output size to avoid huge spans
-                    output_str = str(result.output)[:5000]
-                    self.span.set_attribute("tool.output", output_str)
-                
-                # Add timing
-                duration_ms = (time.time() - self.start_time) * 1000
-                self.span.set_attribute("tool.duration_ms", duration_ms)
-            except Exception as e:
-                logger.error(f"Failed to record tool result: {e}")
-                
-        def record_error(self, error):
-            """Record an error that occurred during tool execution."""
-            try:
-                self.span.set_status(Status(StatusCode.ERROR, str(error)))
-                self.span.record_exception(error)
-                self.span.set_attribute("error.message", str(error))
-                self.span.set_attribute("tool.success", False)
-            except Exception as e:
-                logger.error(f"Failed to record tool error: {e}")
-    
     try:
-        yield ToolSpanContext(span)
+        yield ToolSpanContext(span, start_time)
     finally:
         # Always end the span
         try:
@@ -377,11 +485,6 @@ async def llm_span(
             system_prompt = msg.get("content", "")
             break
     
-    # Get the tracer from AgentOps
-    from agentops.sdk.core import tracer
-    from agentops.semconv import SpanKind, SpanAttributes
-    from opentelemetry.trace import SpanKind as OTelSpanKind
-    
     # Create span attributes following OpenTelemetry Gen AI semantic conventions
     attributes = {
         # Core AgentOps attribute
@@ -394,6 +497,22 @@ async def llm_span(
         SpanAttributes.LLM_REQUEST_MAX_TOKENS: max_tokens if max_tokens else -1,
         SpanAttributes.LLM_REQUEST_STREAMING: kwargs.get("stream", False),
     }
+    
+    # Add additional request attributes if present in kwargs
+    if "top_p" in kwargs:
+        attributes[SpanAttributes.LLM_REQUEST_TOP_P] = kwargs["top_p"]
+    if "top_k" in kwargs:
+        attributes[SpanAttributes.LLM_REQUEST_TOP_K] = kwargs["top_k"]
+    if "seed" in kwargs:
+        attributes[SpanAttributes.LLM_REQUEST_SEED] = kwargs["seed"]
+    if "frequency_penalty" in kwargs:
+        attributes[SpanAttributes.LLM_REQUEST_FREQUENCY_PENALTY] = kwargs["frequency_penalty"]
+    if "presence_penalty" in kwargs:
+        attributes[SpanAttributes.LLM_REQUEST_PRESENCE_PENALTY] = kwargs["presence_penalty"]
+    if "stop" in kwargs or "stop_sequences" in kwargs:
+        stop_sequences = kwargs.get("stop", kwargs.get("stop_sequences", []))
+        if stop_sequences:
+            attributes[SpanAttributes.LLM_REQUEST_STOP_SEQUENCES] = str(stop_sequences)
     
     # Add prompts/messages following the semantic convention
     if messages:
@@ -417,10 +536,6 @@ async def llm_span(
                 if "description" in tool:
                     attributes[f"{prefix}.description"] = tool["description"][:200]
     
-    # Get the tracer from AgentOps
-    from agentops.sdk.core import tracer
-    from opentelemetry.trace import Status, StatusCode
-    
     if not tracer.initialized:
         yield None
         return
@@ -438,78 +553,8 @@ async def llm_span(
     
     start_time = time.time()
     
-    class LLMSpanContext:
-        def __init__(self, span):
-            self.span = span
-            self.start_time = start_time
-            
-        def record_response(self, response):
-            """Record the LLM response to the span."""
-            try:
-                # Update span with response data following semantic conventions
-                if hasattr(response, "choices") and response.choices:
-                    choice = response.choices[0]
-                    
-                    # Response model (might be different from request)
-                    if hasattr(response, "model"):
-                        self.span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL, response.model)
-                    
-                    # Finish reason
-                    if hasattr(choice, "finish_reason"):
-                        self.span.set_attribute(SpanAttributes.LLM_RESPONSE_FINISH_REASON, choice.finish_reason)
-                    
-                    # Response ID
-                    if hasattr(response, "id"):
-                        self.span.set_attribute(SpanAttributes.LLM_RESPONSE_ID, response.id)
-                    
-                    if hasattr(choice, "message"):
-                        # Extract and set completion following semantic convention
-                        raw_content = choice.message.content if hasattr(choice.message, "content") else str(choice.message)
-                        completion = _extract_content_from_structured_format(raw_content)
-                        
-                        if completion:
-                            # Use the semantic convention for completions - store full content without truncation
-                            self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant")
-                            self.span.set_attribute(f"{SpanAttributes.LLM_COMPLETIONS}.0.content", completion)
-                        
-                        # Track tool calls if present
-                        if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-                            for i, tc in enumerate(choice.message.tool_calls):
-                                prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls.{i}"
-                                self.span.set_attribute(f"{prefix}.id", tc.id if hasattr(tc, "id") else "")
-                                if hasattr(tc, "function"):
-                                    self.span.set_attribute(f"{prefix}.name", tc.function.name)
-                                    self.span.set_attribute(f"{prefix}.arguments", tc.function.arguments[:500])
-                
-                # Add usage data following semantic conventions
-                if hasattr(response, "usage"):
-                    self.span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS, response.usage.prompt_tokens)
-                    self.span.set_attribute(SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, response.usage.completion_tokens)
-                    total = response.usage.prompt_tokens + response.usage.completion_tokens
-                    self.span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total)
-                    
-                    # Add reasoning tokens if available (for models with thinking/reasoning)
-                    if hasattr(response.usage, "reasoning_tokens") and response.usage.reasoning_tokens:
-                        self.span.set_attribute(SpanAttributes.LLM_USAGE_REASONING_TOKENS, response.usage.reasoning_tokens)
-                
-                
-                # Set successful status
-                self.span.set_status(Status(StatusCode.OK))
-                
-            except Exception as e:
-                logger.error(f"Failed to record LLM response: {e}")
-                
-        def record_error(self, error):
-            """Record an error that occurred during the LLM call."""
-            try:
-                self.span.set_status(Status(StatusCode.ERROR, str(error)))
-                self.span.record_exception(error)
-                self.span.set_attribute("error.message", str(error))
-            except Exception as e:
-                logger.error(f"Failed to record LLM error: {e}")
-    
     try:
-        yield LLMSpanContext(span)
+        yield LLMSpanContext(span, start_time)
     finally:
         # Always end the span and ensure it's flushed
         try:
@@ -551,11 +596,6 @@ def record_event(name: str, level: str = "DEFAULT", message: str = "", metadata:
         return
     
     try:
-        # Get the tracer from AgentOps
-        from agentops.sdk.core import tracer
-        from agentops.semconv import SpanKind
-        from opentelemetry.trace import Status, StatusCode
-        
         if not tracer.initialized:
             return
             
@@ -605,9 +645,6 @@ async def flush_trace() -> None:
         return
     
     try:
-        # Get the tracer
-        from agentops.sdk.core import tracer
-        
         if tracer.initialized:
             # Use the tracer's internal flush method
             tracer._flush_span_processors()

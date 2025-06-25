@@ -11,7 +11,6 @@ import dramatiq
 import uuid
 from agentpress.thread_manager import ThreadManager
 from services.supabase import DBConnection
-from services import redis
 from dramatiq.brokers.rabbitmq import RabbitmqBroker
 import os
 from dotenv import load_dotenv

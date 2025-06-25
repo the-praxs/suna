@@ -18,7 +18,7 @@ from openai import OpenAIError
 import litellm
 from utils.logger import logger
 from utils.config import config
-from services.agentops import get_current_trace_context, is_initialized as agentops_is_initialized, llm_span
+from services.agentops import is_initialized as agentops_is_initialized, llm_span
 
 # litellm.set_verbose=True
 litellm.modify_params=True
@@ -318,7 +318,9 @@ async def make_llm_api_call(
         tools=tools,
         top_p=top_p,
         stream=stream,
-        reasoning_effort=reasoning_effort if enable_thinking else None
+        reasoning_effort=reasoning_effort if enable_thinking else None,
+        response_format=response_format,
+        tool_choice=tool_choice if tools else None
     ) as span:
         last_error = None
         for attempt in range(MAX_RETRIES):
