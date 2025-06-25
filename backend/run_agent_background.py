@@ -43,7 +43,6 @@ dramatiq.set_broker(rabbitmq_broker)
 
 _initialized = False
 db = DBConnection()
-db = DBConnection()
 workflow_executor = WorkflowExecutor(db)
 deterministic_executor = DeterministicWorkflowExecutor(db)
 instance_id = "single"
@@ -187,37 +186,11 @@ async def run_agent_background(
         # Setup Pub/Sub listener for control signals
         pubsub = await redis.create_pubsub()
         
-        # Create a span for Redis subscription
-        from agentops.sdk.core import tracer
-        from agentops.semconv import SpanKind
-        
-        redis_span = None
-        if tracer.initialized:
-            redis_span, _, _ = tracer.make_span(
-                "redis_subscription_setup",
-                SpanKind.OPERATION,
-                attributes={
-                    "operation.name": "redis_subscription",
-                    "redis.channels": [instance_control_channel, global_control_channel],
-                    "redis.agent_run_id": agent_run_id
-                }
-            )
-        
         try:
             await retry(lambda: pubsub.subscribe(instance_control_channel, global_control_channel))
-            if redis_span:
-                redis_span.set_attribute("redis.subscription_success", True)
         except Exception as e:
             logger.error(f"Redis failed to subscribe to control channels: {e}", exc_info=True)
-            if redis_span:
-                redis_span.set_attribute("redis.subscription_success", False)
-                redis_span.record_exception(e)
-                from opentelemetry.trace import Status, StatusCode
-                redis_span.set_status(Status(StatusCode.ERROR, str(e)))
             raise e
-        finally:
-            if redis_span:
-                redis_span.end()
 
         logger.debug(f"Subscribed to control channels: {instance_control_channel}, {global_control_channel}")
         stop_checker = asyncio.create_task(check_for_stop_signal())
