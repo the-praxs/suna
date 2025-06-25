@@ -108,6 +108,10 @@ WEBHOOK_BASE_URL=https://yourdomain.com
 # MCP Configuration
 MCP_CREDENTIAL_ENCRYPTION_KEY=your-generated-encryption-key
 
+# Observability and Monitoring
+AGENTOPS_API_KEY=your-agentops-api-key
+AGENTOPS_LOG_LEVEL=INFO
+
 # Optional APIs
 RAPID_API_KEY=your-rapidapi-key
 SMITHERY_API_KEY=your-smithery-key
@@ -250,6 +254,46 @@ The feature flag system includes robust error handling:
 - Backend operations are direct Redis calls (no caching)
 - Frontend includes 5-minute caching for performance
 - Use `clearCache()` in frontend to force refresh
+
+---
+
+## Observability
+
+Suna includes comprehensive observability and monitoring through [AgentOps](https://agentops.ai/). This provides:
+
+- **Automatic LLM Call Tracing**: All LLM API calls are automatically instrumented with detailed metrics
+- **Tool Execution Monitoring**: Tool calls are traced with parameters, results, and performance metrics
+- **Agent Run Tracking**: Complete agent execution flows with hierarchical span relationships
+- **Modern Semantic Conventions**: Uses AgentOps semantic conventions for consistent telemetry data
+
+### Configuration
+
+AgentOps integration is configured through environment variables:
+
+```sh
+AGENTOPS_API_KEY=your-agentops-api-key
+
+# Optional: Log level for AgentOps SDK (DEBUG, INFO, WARNING, ERROR)
+AGENTOPS_LOG_LEVEL=INFO
+```
+
+### Features
+
+- **SDK v4 Modern Patterns**: Uses the latest AgentOps SDK with OpenTelemetry-based tracing
+- **Automatic Instrumentation**: LLM calls are automatically instrumented when `instrument_llm_calls=True`
+- **Decorator-Based Tool Tracing**: Tools use `@agentops.tool` decorators for clean instrumentation
+- **Semantic Conventions**: Follows AgentOps semantic conventions for consistent attribute naming
+- **Error Handling**: Robust error handling with fail-safe mode enabled
+- **Context Propagation**: Proper trace context propagation through async operations
+
+### Getting Started
+
+1. Sign up at the [AgentOps](https://app.agentops.ai) dashboard and create a project
+2. Copy your API key from the project settings
+3. Add the API key to your `.env` file as `AGENTOPS_API_KEY`
+4. Restart your backend services
+
+The integration will automatically start collecting telemetry data for all agent runs, LLM calls, and tool executions.
 
 ---
 
