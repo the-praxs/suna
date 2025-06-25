@@ -421,38 +421,14 @@ class ThreadManager:
             # Add returning='representation' to get the inserted row data including the id
             result = await client.table('messages').insert(data_to_insert, returning='representation').execute()
             logger.info(f"Successfully added message to thread {thread_id}")
-            
-            # Record event for message addition
-            record_event(
-                name="message_added",
-                level="DEFAULT",
-                message=f"Added {type} message to thread",
-                metadata={
-                    "thread_id": thread_id,
-                    "message_type": type,
-                    "is_llm_message": is_llm_message
-                }
-            )
 
             if result.data and len(result.data) > 0 and isinstance(result.data[0], dict) and 'message_id' in result.data[0]:
                 return result.data[0]
             else:
                 logger.error(f"Insert operation failed or did not return expected data structure for thread {thread_id}. Result data: {result.data}")
-                record_event(
-                    name="message_add_failed",
-                    level="ERROR",
-                    message="Failed to get message_id from insert result",
-                    metadata={"thread_id": thread_id, "type": type}
-                )
                 return None
         except Exception as e:
             logger.error(f"Failed to add message to thread {thread_id}: {str(e)}", exc_info=True)
-            record_event(
-                name="message_add_error",
-                level="ERROR",
-                message=f"Failed to add message: {str(e)}",
-                metadata={"thread_id": thread_id, "type": type}
-            )
             raise
 
     async def get_llm_messages(self, thread_id: str) -> List[Dict[str, Any]]:
