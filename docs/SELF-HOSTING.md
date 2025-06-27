@@ -183,6 +183,11 @@ DAYTONA_API_KEY=your-daytona-key
 DAYTONA_SERVER_URL=https://app.daytona.io/api
 DAYTONA_TARGET=us
 
+# Observability and Monitoring (Optional)
+AGENTOPS_API_KEY=your-agentops-api-key
+AGENTOPS_LOG_LEVEL=INFO
+AGENTOPS_ENDPOINT=https://api.agentops.ai
+
 # Background job processing (Required)
 QSTASH_URL=https://qstash.upstash.io
 QSTASH_TOKEN=your-qstash-token

@@ -156,6 +156,10 @@ def load_existing_env_vars():
                 "MCP_CREDENTIAL_ENCRYPTION_KEY", ""
             ),
         },
+        "observability": {
+            "AGENTOPS_API_KEY": backend_env.get("AGENTOPS_API_KEY", ""),
+            "AGENTOPS_LOG_LEVEL": backend_env.get("AGENTOPS_LOG_LEVEL", "INFO"),
+        },
         "frontend": {
             "NEXT_PUBLIC_SUPABASE_URL": frontend_env.get(
                 "NEXT_PUBLIC_SUPABASE_URL", ""
@@ -249,6 +253,7 @@ class SetupWizard:
             "smithery": existing_env_vars["smithery"],
             "qstash": existing_env_vars["qstash"],
             "mcp": existing_env_vars["mcp"],
+            "observability": existing_env_vars.get("observability", {}),
         }
 
         # Override with any progress data (in case user is resuming)
@@ -259,7 +264,7 @@ class SetupWizard:
             else:
                 self.env_vars[key] = value
 
-        self.total_steps = 14
+        self.total_steps = 15
 
     def show_current_config(self):
         """Shows the current configuration status."""
@@ -325,6 +330,12 @@ class SetupWizard:
         else:
             config_items.append(f"{Colors.YELLOW}○{Colors.ENDC} MCP encryption key")
 
+        # Check AgentOps observability (optional)
+        if self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY"):
+            config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} AgentOps (optional)")
+        else:
+            config_items.append(f"{Colors.CYAN}○{Colors.ENDC} AgentOps (optional)")
+
         if any("✓" in item for item in config_items):
             print_info("Current configuration status:")
             for item in config_items:
@@ -352,10 +363,11 @@ class SetupWizard:
             self.run_step(8, self.collect_smithery_keys)
             self.run_step(9, self.collect_qstash_keys)
             self.run_step(10, self.collect_mcp_keys)
-            self.run_step(11, self.configure_env_files)
-            self.run_step(12, self.setup_supabase_database)
-            self.run_step(13, self.install_dependencies)
-            self.run_step(14, self.start_suna)
+            self.run_step(11, self.collect_observability_keys)
+            self.run_step(12, self.configure_env_files)
+            self.run_step(13, self.setup_supabase_database)
+            self.run_step(14, self.install_dependencies)
+            self.run_step(15, self.start_suna)
 
             self.final_instructions()
 
@@ -923,9 +935,61 @@ class SetupWizard:
 
         print_success("MCP configuration saved.")
 
+    def collect_observability_keys(self):
+        """Collects the optional AgentOps observability configuration."""
+        print_step(11, self.total_steps, "Collecting Observability Configuration (Optional)")
+
+        # Check if we already have values configured
+        existing_key = self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY", "")
+        existing_log_level = self.env_vars.get("observability", {}).get("AGENTOPS_LOG_LEVEL", "INFO")
+        
+        if existing_key:
+            print_info(
+                f"Found existing AgentOps API key: {mask_sensitive_value(existing_key)}"
+            )
+            print_info("Press Enter to keep current values or type new ones.")
+        else:
+            print_info("AgentOps provides observability and monitoring for your AI agents.")
+            print_info(
+                "Visit https://app.agentops.ai/settings/projects to create a project and get an API key."
+            )
+            print_info("This is optional - you can skip it and add it later.")
+
+        # Initialize observability dict if it doesn't exist
+        if "observability" not in self.env_vars:
+            self.env_vars["observability"] = {}
+
+        agentops_key = self._get_input(
+            "Enter your AgentOps API key (or press Enter to skip): ",
+            validate_api_key,
+            "The key seems invalid, but continuing. You can edit it later in backend/.env",
+            allow_empty=True,
+            default_value=existing_key,
+        )
+        self.env_vars["observability"]["AGENTOPS_API_KEY"] = agentops_key
+
+        if agentops_key:
+            # Ask for log level only if API key is provided
+            print_info("AgentOps log levels: DEBUG, INFO, WARNING, ERROR")
+            log_level_prompt = f"Enter log level (or press Enter for default) [{Colors.GREEN}{existing_log_level}{Colors.ENDC}]: "
+            log_level = input(log_level_prompt).strip().upper()
+            
+            if not log_level:
+                log_level = existing_log_level
+            elif log_level not in ["DEBUG", "INFO", "WARNING", "ERROR"]:
+                print_warning(f"Invalid log level '{log_level}'. Using default 'INFO'.")
+                log_level = "INFO"
+            
+            self.env_vars["observability"]["AGENTOPS_LOG_LEVEL"] = log_level
+            print_success(f"AgentOps configuration saved with log level: {log_level}")
+        else:
+            # Set default log level even if no API key
+            self.env_vars["observability"]["AGENTOPS_LOG_LEVEL"] = "INFO"
+            print_info("Skipping AgentOps configuration.")
+
     def configure_env_files(self):
         """Configures and writes the .env files for frontend and backend."""
-        print_step(11, self.total_steps, "Configuring Environment Files")
+        print_step(12, self.total_steps, "Configuring Environment Files")
 
         # --- Backend .env ---
         is_docker = self.env_vars["setup_method"] == "docker"
@@ -945,6 +1009,7 @@ class SetupWizard:
             **self.env_vars["smithery"],
             **self.env_vars["qstash"],
             **self.env_vars["mcp"],
+            **self.env_vars.get("observability", {}),
             **self.env_vars["daytona"],
             "NEXT_PUBLIC_URL": "http://localhost:3000",
         }
@@ -978,7 +1043,7 @@ class SetupWizard:
 
     def setup_supabase_database(self):
         """Links the project to Supabase and pushes database migrations."""
-        print_step(12, self.total_steps, "Setting up Supabase Database")
+        print_step(13, self.total_steps, "Setting up Supabase Database")
 
         print_info(
             "This step will link your project to Supabase and push database migrations."
@@ -1057,7 +1122,7 @@ class SetupWizard:
 
             print_info("Pushing database migrations...")
             subprocess.run(
-                ["supabase", "db", "push"], cwd="backend", check=True, shell=IS_WINDOWS
+                ["supabase", "db", "push", "--linked"], cwd="backend", check=True, shell=IS_WINDOWS
             )
             print_success("Database migrations pushed successfully.")
 
@@ -1077,7 +1142,7 @@ class SetupWizard:
 
     def install_dependencies(self):
         """Installs frontend and backend dependencies for manual setup."""
-        print_step(13, self.total_steps, "Installing Dependencies")
+        print_step(14, self.total_steps, "Installing Dependencies")
         if self.env_vars["setup_method"] == "docker":
             print_info(
                 "Skipping dependency installation for Docker setup (will be handled by Docker Compose)."
@@ -1119,7 +1184,7 @@ class SetupWizard:
 
     def start_suna(self):
         """Starts Suna using Docker Compose or shows instructions for manual startup."""
-        print_step(14, self.total_steps, "Starting Suna")
+        print_step(15, self.total_steps, "Starting Suna")
         if self.env_vars["setup_method"] == "docker":
             print_info("Starting Suna with Docker Compose...")
             try:

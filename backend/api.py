@@ -25,6 +25,7 @@ from services import transcription as transcription_api
 from services.mcp_custom import discover_custom_tools
 import sys
 from services import email_api
+from services.agentops import initialize_agentops
 
 
 load_dotenv()
@@ -45,6 +46,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting up FastAPI application with instance ID: {instance_id} in {config.ENV_MODE.value} mode")
     try:
         await db.initialize()
+        
+        # Initialize AgentOps in the main API context
+        try:
+            initialize_agentops()
+            logger.info("AgentOps initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize AgentOps: {e}")
         
         agent_api.initialize(
             db,

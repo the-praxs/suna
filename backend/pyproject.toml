@@ -61,6 +61,7 @@ dependencies = [
   "croniter>=1.4.0",
   "qstash>=2.0.0",
   "structlog==25.4.0",
+  "agentops>=0.4.16",
 ]
 
 [project.urls]
