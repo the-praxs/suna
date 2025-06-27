@@ -261,8 +261,9 @@ async def make_llm_api_call(
     top_p: Optional[float] = None,
     model_id: Optional[str] = None,
     enable_thinking: Optional[bool] = False,
-    reasoning_effort: Optional[str] = 'low'
-) -> Union[Dict[str, Any], AsyncGenerator]:
+    reasoning_effort: Optional[str] = 'low',
+    return_span_context: bool = False
+) -> Union[Dict[str, Any], AsyncGenerator, tuple]:
     """
     Make an API call to a language model using LiteLLM.
 
@@ -281,9 +282,10 @@ async def make_llm_api_call(
         model_id: Optional ARN for Bedrock inference profiles
         enable_thinking: Whether to enable thinking
         reasoning_effort: Level of reasoning effort
+        return_span_context: If True and streaming, returns (response, span_context) tuple
 
     Returns:
-        Union[Dict[str, Any], AsyncGenerator]: API response or stream
+        Union[Dict[str, Any], AsyncGenerator, tuple]: API response, stream, or (response, span_context) tuple
 
     Raises:
         LLMRetryError: If API call fails after retries
@@ -310,6 +312,9 @@ async def make_llm_api_call(
     )
     
     # Use AgentOps LLM span async context manager
+    # For streaming with span context return, use manual span ending
+    manual_end = stream and return_span_context
+    
     async with llm_span(
         model=model_name,
         messages=messages,
@@ -320,7 +325,8 @@ async def make_llm_api_call(
         stream=stream,
         reasoning_effort=reasoning_effort if enable_thinking else None,
         response_format=response_format,
-        tool_choice=tool_choice if tools else None
+        tool_choice=tool_choice if tools else None,
+        manual_end=manual_end
     ) as span:
         last_error = None
         for attempt in range(MAX_RETRIES):
@@ -330,13 +336,19 @@ async def make_llm_api_call(
 
                 response = await litellm.acompletion(**params)
                 logger.debug(f"Successfully received API response from {model_name}")
-                logger.debug(f"Response: {response}")
+                
                 
                 # Record the response in AgentOps if span is available
-                if span:
+                if span and not manual_end:
+                    # Only record response if we're not manually managing the span
                     span.record_response(response)
                 
-                return response
+                # Return span context with response if requested for streaming
+                if return_span_context and stream:
+                    logger.info("📤 Returning response with span context for manual token recording")
+                    return response, span
+                else:
+                    return response
 
             except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
                 last_error = e

@@ -175,9 +175,11 @@ class ToolSpanContext:
 class LLMSpanContext:
     """Context for LLM call spans."""
     
-    def __init__(self, span, start_time):
+    def __init__(self, span, start_time, manual_end=False):
         self.span = span
         self.start_time = start_time
+        self.manual_end = manual_end
+        self._ended = False
         
     def record_response(self, response):
         """Record the LLM response to the span."""
@@ -282,6 +284,32 @@ class LLMSpanContext:
             self.span.set_attribute("error.message", str(error))
         except Exception as e:
             logger.error(f"Failed to record LLM error: {e}")
+    
+    def record_tokens(self, prompt_tokens: int, completion_tokens: int, total_tokens: Optional[int] = None):
+        """Record token usage to the span."""
+        try:
+            self.span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
+            self.span.set_attribute(SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+            
+            if total_tokens is None:
+                total_tokens = prompt_tokens + completion_tokens
+            self.span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
+            
+            logger.info(f"✅ Recorded tokens in LLM span: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+        except Exception as e:
+            logger.error(f"Failed to record tokens: {e}")
+    
+    async def end(self):
+        """Manually end the span."""
+        if not self._ended:
+            try:
+                logger.info("🔒 Manually ending LLM span")
+                self.span.end()
+                self._ended = True
+                # Small delay to ensure span is sent
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Failed to manually end LLM span: {e}")
 
 
 def end_agent_trace(
@@ -439,6 +467,7 @@ async def llm_span(
     temperature: float = 0,
     max_tokens: Optional[int] = None,
     tools: Optional[list] = None,
+    manual_end: bool = False,
     **kwargs
 ):
     """
@@ -453,6 +482,7 @@ async def llm_span(
         temperature: Temperature setting
         max_tokens: Maximum tokens
         tools: Tools available to the model
+        manual_end: If True, the span won't be automatically ended when exiting the context
         **kwargs: Additional parameters
         
     Usage:
@@ -460,6 +490,12 @@ async def llm_span(
             response = await litellm.acompletion(...)
             if span_context:
                 span_context.record_response(response)
+                
+        # For manual span management:
+        async with llm_span("gpt-4", messages, manual_end=True) as span_context:
+            # ... do work ...
+            # Later, manually end the span:
+            await span_context.end()
     """
     # Get trace context from async context or global
     trace_context = agentops_trace_context.get() or _current_trace_context
@@ -552,17 +588,21 @@ async def llm_span(
         return
     
     start_time = time.time()
+    span_context = LLMSpanContext(span, start_time, manual_end=manual_end)
     
     try:
-        yield LLMSpanContext(span, start_time)
+        yield span_context
     finally:
-        # Always end the span and ensure it's flushed
-        try:
-            span.end()
-            # Small delay to ensure span is sent before trace context changes
-            await asyncio.sleep(0.01)
-        except Exception as e:
-            logger.error(f"Failed to end LLM span: {e}")
+        # Only end the span automatically if not in manual mode
+        if not manual_end and not span_context._ended:
+            try:
+                span.end()
+                # Small delay to ensure span is sent before trace context changes
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Failed to end LLM span: {e}")
+        elif manual_end and not span_context._ended:
+            logger.info("⏳ LLM span left open for manual ending")
 
 
 def get_current_trace_context() -> Optional[TraceContext]:

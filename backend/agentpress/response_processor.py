@@ -155,6 +155,7 @@ class ResponseProcessor:
         prompt_messages: List[Dict[str, Any]],
         llm_model: str,
         config: ProcessorConfig = ProcessorConfig(),
+        llm_span_context: Optional[Any] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process a streaming LLM response, handling tool calls and execution.
         
@@ -418,6 +419,14 @@ class ResponseProcessor:
                         f"🔥 Estimated tokens – prompt: {prompt_tokens}, "
                         f"completion: {completion_tokens}, total: {prompt_tokens + completion_tokens}"
                     )
+                    
+                    # Record tokens in the LLM span if available
+                    if llm_span_context:
+                        llm_span_context.record_tokens(prompt_tokens, completion_tokens)
+                        logger.info("✅ Recorded estimated tokens in LLM span")
+                    else:
+                        logger.warning("⚠️ No LLM span context available to record tokens")
+                    
                     self.trace.event(name="usage_calculated_with_litellm_token_counter", level="DEFAULT", status_message=f"Usage calculated with litellm.token_counter")
                     record_event(name="usage_calculated_with_litellm_token_counter", level="DEFAULT", message=f"Usage calculated with litellm.token_counter")
                 except Exception as e:
@@ -844,6 +853,14 @@ class ResponseProcessor:
             raise # Use bare 'raise' to preserve the original exception with its traceback
 
         finally:
+            # Close the LLM span if it was passed
+            if llm_span_context:
+                try:
+                    await llm_span_context.end()
+                    logger.info("✅ Closed LLM span after streaming response processing")
+                except Exception as span_e:
+                    logger.error(f"Failed to close LLM span: {str(span_e)}")
+            
             # Save and Yield the final thread_run_end status
             try:
                 end_content = {"status_type": "thread_run_end"}

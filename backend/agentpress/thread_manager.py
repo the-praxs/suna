@@ -736,7 +736,8 @@ Here are the XML tools available with examples:
                               "tools": openapi_tool_schemas,
                             }
                         )
-                    llm_response = await make_llm_api_call(
+                    # For streaming, request span context to be returned
+                    llm_result = await make_llm_api_call(
                         prepared_messages, # Pass the potentially modified messages
                         llm_model,
                         temperature=llm_temperature,
@@ -745,8 +746,17 @@ Here are the XML tools available with examples:
                         tool_choice=tool_choice if processor_config.native_tool_calling else None,
                         stream=stream,
                         enable_thinking=enable_thinking,
-                        reasoning_effort=reasoning_effort
+                        reasoning_effort=reasoning_effort,
+                        return_span_context=stream  # Return span context for streaming
                     )
+                    
+                    # Extract response and span context if streaming
+                    if stream and isinstance(llm_result, tuple):
+                        llm_response, llm_span_context = llm_result
+                        logger.info("📥 Received LLM response with span context for token recording")
+                    else:
+                        llm_response = llm_result
+                        llm_span_context = None
                     logger.debug("Successfully received raw LLM API response stream/object")
                     
                     record_event(
@@ -783,6 +793,7 @@ Here are the XML tools available with examples:
                         config=processor_config,
                         prompt_messages=prepared_messages,
                         llm_model=llm_model,
+                        llm_span_context=llm_span_context,  # Pass span context for token recording
                     )
 
                     return response_generator
