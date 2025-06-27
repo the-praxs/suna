@@ -89,13 +89,14 @@ class ProcessorConfig:
 class ResponseProcessor:
     """Processes LLM responses, extracting and executing tool calls."""
     
-    def __init__(self, tool_registry: ToolRegistry, add_message_callback: Callable, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agentops_trace=None):
+    def __init__(self, tool_registry: ToolRegistry, add_message_callback: Callable, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None, agentops_trace=None):
         """Initialize the ResponseProcessor.
         
         Args:
             tool_registry: Registry of available tools
             add_message_callback: Callback function to add messages to the thread.
                 MUST return the full saved message object (dict) or None.
+            agent_config: Optional agent configuration with version information
             trace: Optional Langfuse trace client
             is_agent_builder: Whether this is an agent builder session
             target_agent_id: ID of the agent being built (if in agent builder mode)
@@ -110,6 +111,7 @@ class ResponseProcessor:
         self.xml_parser = XMLToolParser(strict_mode=False)
         self.is_agent_builder = is_agent_builder
         self.target_agent_id = target_agent_id
+        self.agent_config = agent_config
         self.agentops_trace = agentops_trace
 
     async def _yield_message(self, message_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -119,6 +121,32 @@ class ResponseProcessor:
         """
         if message_obj:
             return format_for_yield(message_obj)
+
+    async def _add_message_with_agent_info(
+        self,
+        thread_id: str,
+        type: str,
+        content: Union[Dict[str, Any], List[Any], str],
+        is_llm_message: bool = False,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """Helper to add a message with agent version information if available."""
+        agent_id = None
+        agent_version_id = None
+        
+        if self.agent_config:
+            agent_id = self.agent_config.get('agent_id')
+            agent_version_id = self.agent_config.get('current_version_id')
+            
+        return await self.add_message(
+            thread_id=thread_id,
+            type=type,
+            content=content,
+            is_llm_message=is_llm_message,
+            metadata=metadata,
+            agent_id=agent_id,
+            agent_version_id=agent_version_id
+        )
 
     async def process_streaming_response(
         self,
@@ -513,7 +541,7 @@ class ResponseProcessor:
                     "tool_calls": complete_native_tool_calls or None
                 }
 
-                last_assistant_message_object = await self.add_message(
+                last_assistant_message_object = await self._add_message_with_agent_info(
                     thread_id=thread_id, type="assistant", content=message_data,
                     is_llm_message=True, metadata={"thread_run_id": thread_run_id}
                 )
@@ -913,7 +941,7 @@ class ResponseProcessor:
 
             # --- SAVE and YIELD Final Assistant Message ---
             message_data = {"role": "assistant", "content": content, "tool_calls": native_tool_calls_for_message or None}
-            assistant_message_object = await self.add_message(
+            assistant_message_object = await self._add_message_with_agent_info(
                 thread_id=thread_id, type="assistant", content=message_data,
                 is_llm_message=True, metadata={"thread_run_id": thread_run_id}
             )
