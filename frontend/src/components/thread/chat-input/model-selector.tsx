@@ -46,6 +46,8 @@ interface ModelSelectorProps {
   canAccessModel: (modelId: string) => boolean;
   subscriptionStatus: SubscriptionStatus;
   refreshCustomModels?: () => void;
+  billingModalOpen: boolean;
+  setBillingModalOpen: (open: boolean) => void;
   hasBorder?: boolean;
 }
 
@@ -56,10 +58,11 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   canAccessModel,
   subscriptionStatus,
   refreshCustomModels,
+  billingModalOpen,
+  setBillingModalOpen,
   hasBorder = false,
 }) => {
   const [paywallOpen, setPaywallOpen] = useState(false);
-  const [billingModalOpen, setBillingModalOpen] = useState(false);
   const [lockedModel, setLockedModel] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -702,28 +705,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
                     m.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
                     m.id.toLowerCase().includes(searchQuery.toLowerCase())
                   )
-                  // Sort to prioritize recommended paid models first
-                  .sort((a, b) => {
-                    const aRecommendedPaid = MODELS[a.id]?.recommended && a.requiresSubscription;
-                    const bRecommendedPaid = MODELS[b.id]?.recommended && b.requiresSubscription;
-
-                    if (aRecommendedPaid && !bRecommendedPaid) return -1;
-                    if (!aRecommendedPaid && bRecommendedPaid) return 1;
-
-                    // Secondary sorting: recommended free models next
-                    const aRecommended = MODELS[a.id]?.recommended;
-                    const bRecommended = MODELS[b.id]?.recommended;
-
-                    if (aRecommended && !bRecommended) return -1;
-                    if (!aRecommended && bRecommended) return 1;
-
-                    // Paid models next
-                    if (a.requiresSubscription && !b.requiresSubscription) return -1;
-                    if (!a.requiresSubscription && b.requiresSubscription) return 1;
-
-                    // Default to alphabetical order
-                    return a.label.localeCompare(b.label);
-                  })
                   .map((model, index) => renderModelOption(model, index))}
 
                 {uniqueModels.length === 0 && (
@@ -758,13 +739,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         onSave={handleSaveCustomModel}
         initialData={dialogInitialData}
         mode={dialogMode}
-      />
-
-      {/* Billing Modal */}
-      <BillingModal
-        open={billingModalOpen}
-        onOpenChange={setBillingModalOpen}
-        returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
       />
 
       {paywallOpen && (

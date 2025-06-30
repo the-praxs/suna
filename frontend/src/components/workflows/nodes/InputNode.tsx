@@ -18,6 +18,7 @@ import { ScheduleConfigDialog } from "../scheduling/ScheduleConfigDialog";
 import { ScheduleConfig } from "../scheduling/types";
 import { ModelSelector } from "@/components/thread/chat-input/model-selector";
 import { useModelSelection } from "@/components/thread/chat-input/_use-model-selection";
+import { BillingModal } from "@/components/billing/billing-modal";
 
 interface InputNodeData {
   label?: string;
@@ -37,6 +38,7 @@ const InputNode = memo(({ data, selected, id }: NodeProps) => {
   const [isScheduleDialogOpen, setIsScheduleDialogOpen] = useState(false);
   const [localPrompt, setLocalPrompt] = useState(nodeData.prompt || '');
   const { updateNodeData, workflowId } = useWorkflow();
+  const [billingModalOpen, setBillingModalOpen] = useState(false);
 
   // Use the model selection hook
   const {
@@ -226,9 +228,18 @@ const InputNode = memo(({ data, selected, id }: NodeProps) => {
                   canAccessModel={canAccessModel}
                   subscriptionStatus={subscriptionStatus}
                   refreshCustomModels={refreshCustomModels}
+                  billingModalOpen={billingModalOpen}
+                  setBillingModalOpen={setBillingModalOpen}
                 />
               </div>
             </div>
+
+            {/* Billing Modal */}
+            <BillingModal
+              open={billingModalOpen}
+              onOpenChange={setBillingModalOpen}
+              returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
+            />
 
             <div className="space-y-2">
               <Label className="text-sm font-medium">Trigger Type *</Label>

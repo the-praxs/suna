@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect } from 'react';
+import React, { forwardRef, useEffect, useState } from 'react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Square, Loader2, ArrowUp } from 'lucide-react';
@@ -14,6 +14,7 @@ import { useFeatureFlag } from '@/lib/feature-flags';
 import { TooltipContent } from '@/components/ui/tooltip';
 import { Tooltip } from '@/components/ui/tooltip';
 import { TooltipProvider, TooltipTrigger } from '@radix-ui/react-tooltip';
+import { BillingModal } from '@/components/billing/billing-modal';
 
 interface MessageInputProps {
   value: string;
@@ -83,6 +84,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
     },
     ref,
   ) => {
+    const [billingModalOpen, setBillingModalOpen] = useState(false);
     const { enabled: customAgentsEnabled, loading: flagsLoading } = useFeatureFlag('custom_agents');
 
     useEffect(() => {
@@ -163,7 +165,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger>
-                  <p className='text-sm text-amber-500 hidden sm:block'>Upgrade for full performance</p>
+                  <p role='button' className='text-sm text-amber-500 hidden sm:block cursor-pointer' onClick={() => setBillingModalOpen(true)}>Upgrade for full performance</p>
                 </TooltipTrigger>
                 <TooltipContent>
                   <p>The free tier is severely limited by inferior models; upgrade to experience the true full Suna experience.</p>
@@ -182,6 +184,8 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
                 subscriptionStatus={subscriptionStatus}
                 canAccessModel={canAccessModel}
                 refreshCustomModels={refreshCustomModels}
+                billingModalOpen={billingModalOpen}
+                setBillingModalOpen={setBillingModalOpen}
               />
             ) : (
               <ChatSettingsDropdown
@@ -197,6 +201,13 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
               />
             )}
             
+            {/* Billing Modal */}
+            <BillingModal
+              open={billingModalOpen}
+              onOpenChange={setBillingModalOpen}
+              returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
+            />
+
             <VoiceRecorder
               onTranscription={onTranscription}
               disabled={loading || (disabled && !isAgentRunning)}

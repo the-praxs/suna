@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label';
 import { ModelSelector } from './model-selector';
 import { SubscriptionStatus } from './_use-model-selection';
 import { cn } from '@/lib/utils';
+import { BillingModal } from '@/components/billing/billing-modal';
 
 interface ChatSettingsDialogProps {
   selectedModel: string;
@@ -41,6 +42,7 @@ export function ChatSettingsDialog({
   onOpenChange: controlledOnOpenChange,
 }: ChatSettingsDialogProps) {
   const [internalOpen, setInternalOpen] = useState(false);
+  const [billingModalOpen, setBillingModalOpen] = useState(false);
   
   const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
   const setOpen = controlledOnOpenChange || setInternalOpen;
@@ -86,8 +88,17 @@ export function ChatSettingsDialog({
                 canAccessModel={canAccessModel}
                 refreshCustomModels={refreshCustomModels}
                 hasBorder={true}
+                billingModalOpen={billingModalOpen}
+                setBillingModalOpen={setBillingModalOpen}
               />
             </div>
+            {/* Billing Modal */}
+            <BillingModal
+              open={billingModalOpen}
+              onOpenChange={setBillingModalOpen}
+              returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
+            />
+
             <p className="text-xs text-muted-foreground">
               Choose the AI model that best fits your needs. Premium models offer better performance.
             </p>
