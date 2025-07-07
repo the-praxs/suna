@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Request, HTTPException, Response, Depends
+from fastapi import FastAPI, Request, HTTPException, Response, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-import sentry # Keep this import here, right after fastapi imports
+import sentry
 from contextlib import asynccontextmanager
 from agentpress.thread_manager import ThreadManager
 from services.supabase import DBConnection
@@ -22,9 +22,9 @@ from sandbox import api as sandbox_api
 from services import billing as billing_api
 from flags import api as feature_flags_api
 from services import transcription as transcription_api
-from services.mcp_custom import discover_custom_tools
 import sys
 from services import email_api
+from triggers import api as triggers_api
 from services.agentops import initialize_agentops
 
 
@@ -73,6 +73,10 @@ async def lifespan(app: FastAPI):
         # Start background tasks
         # asyncio.create_task(agent_api.restore_running_agent_runs())
         
+        # Initialize triggers API
+        triggers_api.initialize(db)
+        unified_oauth_api.initialize(db)
+        
         yield
         
         # Clean up agent resources
@@ -102,7 +106,7 @@ async def log_requests_middleware(request: Request, call_next):
 
     request_id = str(uuid.uuid4())
     start_time = time.time()
-    client_ip = request.client.host
+    client_ip = request.client.host if request.client else "unknown"
     method = request.method
     path = request.url.path
     query_params = str(request.query_params)
@@ -129,12 +133,17 @@ async def log_requests_middleware(request: Request, call_next):
         raise
 
 # Define allowed origins based on environment
-allowed_origins = ["https://www.suna.so", "https://suna.so", "http://localhost:3000"]
+allowed_origins = ["https://www.suna.so", "https://suna.so"]
 allow_origin_regex = None
+
+# Add staging-specific origins
+if config.ENV_MODE == EnvMode.LOCAL:
+    allowed_origins.append("http://localhost:3000")
 
 # Add staging-specific origins
 if config.ENV_MODE == EnvMode.STAGING:
     allowed_origins.append("https://staging.suna.so")
+    allowed_origins.append("http://localhost:3000")
     allow_origin_regex = r"https://suna-.*-prjcts\.vercel\.app"
 
 app.add_middleware(
@@ -146,38 +155,36 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Project-Id"],
 )
 
-app.include_router(agent_api.router, prefix="/api")
+# Create a main API router
+api_router = APIRouter()
 
-app.include_router(sandbox_api.router, prefix="/api")
+# Include all API routers without individual prefixes
+api_router.include_router(agent_api.router)
+api_router.include_router(sandbox_api.router)
+api_router.include_router(billing_api.router)
+api_router.include_router(feature_flags_api.router)
 
-app.include_router(billing_api.router, prefix="/api")
+from mcp_service import api as mcp_api
+from mcp_service import secure_api as secure_mcp_api
+from mcp_service import template_api as template_api
 
-app.include_router(feature_flags_api.router, prefix="/api")
+api_router.include_router(mcp_api.router)
+api_router.include_router(secure_mcp_api.router, prefix="/secure-mcp")
+api_router.include_router(template_api.router, prefix="/templates")
 
-from mcp_local import api as mcp_api
-from mcp_local import secure_api as secure_mcp_api
-
-app.include_router(mcp_api.router, prefix="/api")
-app.include_router(secure_mcp_api.router, prefix="/api/secure-mcp")
-
-app.include_router(transcription_api.router, prefix="/api")
-app.include_router(email_api.router, prefix="/api")
-
-from workflows import api as workflows_api
-workflows_api.initialize(db)
-app.include_router(workflows_api.router, prefix="/api")
-
-from webhooks import api as webhooks_api
-webhooks_api.initialize(db)
-app.include_router(webhooks_api.router, prefix="/api")
-
-from scheduling import api as scheduling_api
-app.include_router(scheduling_api.router)
+api_router.include_router(transcription_api.router)
+api_router.include_router(email_api.router)
 
 from knowledge_base import api as knowledge_base_api
-app.include_router(knowledge_base_api.router, prefix="/api")
+api_router.include_router(knowledge_base_api.router)
 
-@app.get("/api/health")
+from triggers import api as triggers_api
+from triggers import unified_oauth_api
+api_router.include_router(triggers_api.router)
+api_router.include_router(unified_oauth_api.router)
+
+# Add health check to API router
+@api_router.get("/health")
 async def health_check():
     """Health check endpoint to verify API is working."""
     logger.info("Health check endpoint called")
@@ -187,20 +194,9 @@ async def health_check():
         "instance_id": instance_id
     }
 
-class CustomMCPDiscoverRequest(BaseModel):
-    type: str
-    config: Dict[str, Any]
+# Include the main API router with /api prefix
+app.include_router(api_router, prefix="/api")
 
-
-@app.post("/api/mcp/discover-custom-tools")
-async def discover_custom_mcp_tools(request: CustomMCPDiscoverRequest):
-    try:
-        return await discover_custom_tools(request.type, request.config)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error discovering custom MCP tools: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

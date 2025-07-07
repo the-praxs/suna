@@ -149,7 +149,14 @@ def load_existing_env_vars():
                 "QSTASH_CURRENT_SIGNING_KEY", ""
             ),
             "QSTASH_NEXT_SIGNING_KEY": backend_env.get("QSTASH_NEXT_SIGNING_KEY", ""),
+        },
+        "webhook": {
             "WEBHOOK_BASE_URL": backend_env.get("WEBHOOK_BASE_URL", ""),
+        },
+        "slack": {
+            "SLACK_CLIENT_ID": backend_env.get("SLACK_CLIENT_ID", ""),
+            "SLACK_CLIENT_SECRET": backend_env.get("SLACK_CLIENT_SECRET", ""),
+            "SLACK_REDIRECT_URI": backend_env.get("SLACK_REDIRECT_URI", ""),
         },
         "mcp": {
             "MCP_CREDENTIAL_ENCRYPTION_KEY": backend_env.get(
@@ -252,6 +259,8 @@ class SetupWizard:
             "rapidapi": existing_env_vars["rapidapi"],
             "smithery": existing_env_vars["smithery"],
             "qstash": existing_env_vars["qstash"],
+            "slack": existing_env_vars["slack"],
+            "webhook": existing_env_vars["webhook"],
             "mcp": existing_env_vars["mcp"],
             "observability": existing_env_vars.get("observability", {}),
         }
@@ -264,7 +273,7 @@ class SetupWizard:
             else:
                 self.env_vars[key] = value
 
-        self.total_steps = 15
+        self.total_steps = 17
 
     def show_current_config(self):
         """Shows the current configuration status."""
@@ -330,6 +339,18 @@ class SetupWizard:
         else:
             config_items.append(f"{Colors.YELLOW}○{Colors.ENDC} MCP encryption key")
 
+        # Check Slack configuration
+        if self.env_vars["slack"]["SLACK_CLIENT_ID"]:
+            config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} Slack (optional)")
+        else:
+            config_items.append(f"{Colors.CYAN}○{Colors.ENDC} Slack (optional)")
+
+        # Check Webhook configuration
+        if self.env_vars["webhook"]["WEBHOOK_BASE_URL"]:
+            config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} Webhook")
+        else:
+            config_items.append(f"{Colors.YELLOW}○{Colors.ENDC} Webhook")
+
         # Check AgentOps observability (optional)
         if self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY"):
             config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} AgentOps (optional)")
@@ -363,11 +384,13 @@ class SetupWizard:
             self.run_step(8, self.collect_smithery_keys)
             self.run_step(9, self.collect_qstash_keys)
             self.run_step(10, self.collect_mcp_keys)
-            self.run_step(11, self.collect_observability_keys)
-            self.run_step(12, self.configure_env_files)
-            self.run_step(13, self.setup_supabase_database)
-            self.run_step(14, self.install_dependencies)
-            self.run_step(15, self.start_suna)
+            self.run_step(11, self.collect_slack_keys)
+            self.run_step(12, self.collect_webhook_keys)
+            self.run_step(13, self.collect_observability_keys)
+            self.run_step(14, self.configure_env_files)
+            self.run_step(15, self.setup_supabase_database)
+            self.run_step(16, self.install_dependencies)
+            self.run_step(17, self.start_suna)
 
             self.final_instructions()
 
@@ -847,16 +870,15 @@ class SetupWizard:
             print_info("Skipping Smithery API key.")
 
     def collect_qstash_keys(self):
-        """Collects the required QStash and webhook configuration."""
+        """Collects the required QStash configuration."""
         print_step(
             9,
             self.total_steps,
-            "Collecting QStash & Webhook Configuration",
+            "Collecting QStash Configuration",
         )
 
         # Check if we already have values configured
         existing_token = self.env_vars["qstash"]["QSTASH_TOKEN"]
-        existing_webhook_url = self.env_vars["qstash"]["WEBHOOK_BASE_URL"]
         if existing_token:
             print_info(
                 f"Found existing QStash token: {mask_sensitive_value(existing_token)}"
@@ -901,19 +923,7 @@ class SetupWizard:
         )
         self.env_vars["qstash"]["QSTASH_NEXT_SIGNING_KEY"] = next_signing_key
 
-        # Collect webhook base URL
-        print_info(
-            "Webhook base URL must be publicly accessible for workflows to receive callbacks."
-        )
-        webhook_url = self._get_input(
-            "Enter your webhook base URL (e.g., https://yourdomain.com): ",
-            validate_url,
-            "Invalid URL format. Please enter a valid publicly accessible URL.",
-            default_value=existing_webhook_url,
-        )
-        self.env_vars["qstash"]["WEBHOOK_BASE_URL"] = webhook_url
-
-        print_success("QStash and webhook configuration saved.")
+        print_success("QStash configuration saved.")
 
     def collect_mcp_keys(self):
         """Collects the MCP configuration."""
@@ -935,9 +945,87 @@ class SetupWizard:
 
         print_success("MCP configuration saved.")
 
+    def collect_slack_keys(self):
+        """Collects the optional Slack configuration."""
+        print_step(11, self.total_steps, "Collecting Slack Configuration (Optional)")
+
+        # Check if we already have values configured
+        has_existing = any(self.env_vars["slack"].values())
+        if has_existing:
+            print_info(
+                "Found existing Slack configuration. Press Enter to keep current values or type new ones."
+            )
+        else:
+            print_info("Slack integration enables communication and notifications.")
+            print_info("Create a Slack app at https://api.slack.com/apps to get your credentials.")
+            print_info("You can skip this step and configure Slack later.")
+
+        # Ask if user wants to configure Slack
+        if not has_existing:
+            configure_slack = input("Do you want to configure Slack integration? (y/N): ").lower().strip()
+            if configure_slack != 'y':
+                print_info("Skipping Slack configuration.")
+                return
+
+        self.env_vars["slack"]["SLACK_CLIENT_ID"] = self._get_input(
+            "Enter your Slack Client ID (or press Enter to skip): ",
+            validate_api_key,
+            "Invalid Slack Client ID format. It should be a valid API key.",
+            allow_empty=True,
+            default_value=self.env_vars["slack"]["SLACK_CLIENT_ID"],
+        )
+        
+        if self.env_vars["slack"]["SLACK_CLIENT_ID"]:
+            self.env_vars["slack"]["SLACK_CLIENT_SECRET"] = self._get_input(
+                "Enter your Slack Client Secret: ",
+                validate_api_key,
+                "Invalid Slack Client Secret format. It should be a valid API key.",
+                default_value=self.env_vars["slack"]["SLACK_CLIENT_SECRET"],
+            )
+            
+            # Set default redirect URI if not already configured
+            if not self.env_vars["slack"]["SLACK_REDIRECT_URI"]:
+                self.env_vars["slack"]["SLACK_REDIRECT_URI"] = "http://localhost:3000/api/integrations/slack/callback"
+            
+            self.env_vars["slack"]["SLACK_REDIRECT_URI"] = self._get_input(
+                "Enter your Slack Redirect URI: ",
+                validate_url,
+                "Invalid Slack Redirect URI format. It should be a valid URL.",
+                default_value=self.env_vars["slack"]["SLACK_REDIRECT_URI"],
+            )
+            
+            print_success("Slack configuration saved.")
+        else:
+            print_info("Skipping Slack configuration.")
+
+    def collect_webhook_keys(self):
+        """Collects the webhook configuration."""
+        print_step(12, self.total_steps, "Collecting Webhook Configuration")
+
+        # Check if we already have values configured
+        has_existing = bool(self.env_vars["webhook"]["WEBHOOK_BASE_URL"])
+        if has_existing:
+            print_info(
+                f"Found existing webhook URL: {self.env_vars['webhook']['WEBHOOK_BASE_URL']}"
+            )
+            print_info("Press Enter to keep current value or type a new one.")
+        else:
+            print_info("Webhook base URL is required for workflows to receive callbacks.")
+            print_info("This must be a publicly accessible URL where Suna can receive webhooks.")
+            print_info("For local development, you can use services like ngrok or localtunnel.")
+
+        self.env_vars["webhook"]["WEBHOOK_BASE_URL"] = self._get_input(
+            "Enter your webhook base URL (e.g., https://yourdomain.com): ",
+            validate_url,
+            "Invalid webhook base URL format. It should be a valid publicly accessible URL.",
+            default_value=self.env_vars["webhook"]["WEBHOOK_BASE_URL"],
+        )
+
+        print_success("Webhook configuration saved.")
+
     def collect_observability_keys(self):
         """Collects the optional AgentOps observability configuration."""
-        print_step(11, self.total_steps, "Collecting Observability Configuration (Optional)")
+        print_step(13, self.total_steps, "Collecting Observability Configuration (Optional)")
 
         # Check if we already have values configured
         existing_key = self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY", "")
@@ -989,7 +1077,7 @@ class SetupWizard:
 
     def configure_env_files(self):
         """Configures and writes the .env files for frontend and backend."""
-        print_step(12, self.total_steps, "Configuring Environment Files")
+        print_step(14, self.total_steps, "Configuring Environment Files")
 
         # --- Backend .env ---
         is_docker = self.env_vars["setup_method"] == "docker"
@@ -1008,6 +1096,8 @@ class SetupWizard:
             **self.env_vars["rapidapi"],
             **self.env_vars["smithery"],
             **self.env_vars["qstash"],
+            **self.env_vars["slack"],
+            **self.env_vars["webhook"],
             **self.env_vars["mcp"],
             **self.env_vars.get("observability", {}),
             **self.env_vars["daytona"],
@@ -1043,7 +1133,7 @@ class SetupWizard:
 
     def setup_supabase_database(self):
         """Links the project to Supabase and pushes database migrations."""
-        print_step(13, self.total_steps, "Setting up Supabase Database")
+        print_step(15, self.total_steps, "Setting up Supabase Database")
 
         print_info(
             "This step will link your project to Supabase and push database migrations."
@@ -1142,7 +1232,7 @@ class SetupWizard:
 
     def install_dependencies(self):
         """Installs frontend and backend dependencies for manual setup."""
-        print_step(14, self.total_steps, "Installing Dependencies")
+        print_step(16, self.total_steps, "Installing Dependencies")
         if self.env_vars["setup_method"] == "docker":
             print_info(
                 "Skipping dependency installation for Docker setup (will be handled by Docker Compose)."
@@ -1184,7 +1274,7 @@ class SetupWizard:
 
     def start_suna(self):
         """Starts Suna using Docker Compose or shows instructions for manual startup."""
-        print_step(15, self.total_steps, "Starting Suna")
+        print_step(17, self.total_steps, "Starting Suna")
         if self.env_vars["setup_method"] == "docker":
             print_info("Starting Suna with Docker Compose...")
             try:

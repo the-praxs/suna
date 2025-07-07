@@ -26,7 +26,7 @@ from agentpress.utils.json_helpers import (
     ensure_dict, ensure_list, safe_json_parse,
     to_json_string, format_for_yield
 )
-from litellm import token_counter
+from litellm.utils import token_counter
 from services.agentops import record_event, tool_span
 from agentops.semconv import ToolAttributes, SpanAttributes, ToolStatus
 
@@ -104,9 +104,7 @@ class ResponseProcessor:
         """
         self.tool_registry = tool_registry
         self.add_message = add_message_callback
-        self.trace = trace
-        if not self.trace:
-            self.trace = langfuse.trace(name="anonymous:response_processor")
+        self.trace = trace or langfuse.trace(name="anonymous:response_processor")
         # Initialize the XML parser with backwards compatibility
         self.xml_parser = XMLToolParser(strict_mode=False)
         self.is_agent_builder = is_agent_builder
@@ -114,13 +112,14 @@ class ResponseProcessor:
         self.agent_config = agent_config
         self.agentops_trace = agentops_trace
 
-    async def _yield_message(self, message_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _yield_message(self, message_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Helper to yield a message with proper formatting.
         
         Ensures that content and metadata are JSON strings for client compatibility.
         """
         if message_obj:
             return format_for_yield(message_obj)
+        return None
 
     async def _add_message_with_agent_info(
         self,
@@ -1309,7 +1308,7 @@ class ResponseProcessor:
             
             schema = tool_info['schema'].xml_schema
             params = {}
-            remaining_chunk = xml_chunk
+            remaining_chunk: str = xml_chunk
             
             # --- Store detailed parsing info ---
             parsing_details = {
@@ -1335,7 +1334,9 @@ class ResponseProcessor:
                 
                     elif mapping.node_type == "element":
                         # Extract element content
-                        content, remaining_chunk = self._extract_tag_content(remaining_chunk, mapping.path)
+                        content, new_remaining_chunk = self._extract_tag_content(remaining_chunk, mapping.path)
+                        if new_remaining_chunk is not None:
+                            remaining_chunk = new_remaining_chunk
                         if content is not None:
                             params[mapping.param_name] = content.strip()
                             parsing_details["elements"][mapping.param_name] = content.strip() # Store raw element content
@@ -1567,14 +1568,15 @@ class ResponseProcessor:
         except Exception as e:
             logger.error(f"Error in sequential tool execution: {str(e)}", exc_info=True)
             # Return partial results plus error results for remaining tools
-            completed_tool_names = [r[0].get('function_name', 'unknown') for r in results] if 'results' in locals() else []
+            completed_results = results if 'results' in locals() else []
+            completed_tool_names = [r[0].get('function_name', 'unknown') for r in completed_results]
             remaining_tools = [t for t in tool_calls if t.get('function_name', 'unknown') not in completed_tool_names]
             
             # Add error results for remaining tools
             error_results = [(tool, ToolResult(success=False, output=f"Execution error: {str(e)}")) 
                             for tool in remaining_tools]
                             
-            return (results if 'results' in locals() else []) + error_results
+            return completed_results + error_results
 
     async def _execute_tools_in_parallel(self, tool_calls: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], ToolResult]]:
         """Execute tool calls in parallel and return results.
@@ -1720,52 +1722,6 @@ class ResponseProcessor:
                 )
                 return message_obj # Return the full message object
             
-            # Check if this is an MCP tool (function_name starts with "call_mcp_tool")
-            function_name = tool_call.get("function_name", "")
-            
-            # Check if this is an MCP tool - either the old call_mcp_tool or a dynamically registered MCP tool
-            is_mcp_tool = False
-            if function_name == "call_mcp_tool":
-                is_mcp_tool = True
-            else:
-                # Check if the result indicates it's an MCP tool by looking for MCP metadata
-                if hasattr(result, 'output') and isinstance(result.output, str):
-                    # Check for MCP metadata pattern in the output
-                    if "MCP Tool Result from" in result.output and "Tool Metadata:" in result.output:
-                        is_mcp_tool = True
-                    # Also check for MCP metadata in JSON format
-                    elif "mcp_metadata" in result.output:
-                        is_mcp_tool = True
-            
-            if is_mcp_tool:
-                # Special handling for MCP tools - make content prominent and LLM-friendly
-                result_role = "user" if strategy == "user_message" else "assistant"
-                
-                # Extract the actual content from the ToolResult
-                if hasattr(result, 'output'):
-                    mcp_content = str(result.output)
-                else:
-                    mcp_content = str(result)
-                
-                # Create a simple, LLM-friendly message format that puts content first
-                simple_message = {
-                    "role": result_role,
-                    "content": mcp_content  # Direct content, no complex nesting
-                }
-                
-                logger.info(f"Adding MCP tool result with simplified format for LLM visibility")
-                self.trace.event(name="adding_mcp_tool_result_simplified", level="DEFAULT", status_message="Adding MCP tool result with simplified format for LLM visibility")
-                record_event(name="adding_mcp_tool_result_simplified", level="DEFAULT", message="Adding MCP tool result with simplified format for LLM visibility")
-                
-                message_obj = await self.add_message(
-                    thread_id=thread_id, 
-                    type="tool",
-                    content=simple_message,
-                    is_llm_message=True,
-                    metadata=metadata
-                )
-                return message_obj
-            
             # For XML and other non-native tools, use the new structured format
             # Determine message role based on strategy
             result_role = "user" if strategy == "user_message" else "assistant"
@@ -1902,28 +1858,6 @@ class ResponseProcessor:
             
         return structured_result_v1
 
-    def _format_xml_tool_result(self, tool_call: Dict[str, Any], result: ToolResult) -> str:
-        """Format a tool result wrapped in a <tool_result> tag.
-        
-        DEPRECATED: This method is kept for backwards compatibility.
-        New implementations should use _create_structured_tool_result instead.
-
-        Args:
-            tool_call: The tool call that was executed
-            result: The result of the tool execution
-
-        Returns:
-            String containing the formatted result wrapped in <tool_result> tag
-        """
-        # Always use xml_tag_name if it exists
-        if "xml_tag_name" in tool_call:
-            xml_tag_name = tool_call["xml_tag_name"]
-            return f"<tool_result> <{xml_tag_name}> {str(result)} </{xml_tag_name}> </tool_result>"
-        
-        # Non-XML tool, just return the function result
-        function_name = tool_call["function_name"]
-        return f"Result for {function_name}: {str(result)}"
-
     def _create_tool_context(self, tool_call: Dict[str, Any], tool_index: int, assistant_message_id: Optional[str] = None, parsing_details: Optional[Dict[str, Any]] = None) -> ToolExecutionContext:
         """Create a tool execution context with display name and parsing details populated."""
         context = ToolExecutionContext(
@@ -1982,7 +1916,7 @@ class ResponseProcessor:
             
         # Signal if this is a terminating tool
         if context.function_name in ['ask', 'complete']:
-            metadata["agent_should_terminate"] = True
+            metadata["agent_should_terminate"] = "true"
             logger.info(f"Marking tool status for '{context.function_name}' with termination signal.")
             self.trace.event(name="marking_tool_status_for_termination", level="DEFAULT", status_message=f"Marking tool status for '{context.function_name}' with termination signal.")
             record_event(name="marking_tool_status_for_termination", level="DEFAULT", message=f"Marking tool status for '{context.function_name}' with termination signal.")

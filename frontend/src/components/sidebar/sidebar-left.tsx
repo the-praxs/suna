@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { Bot, Menu, Store, Shield, Key, Workflow } from 'lucide-react';
+import { Bot, Menu, Store, Shield, Key, Workflow, Plus } from 'lucide-react';
 
 import { NavAgents } from '@/components/sidebar/nav-agents';
 import { NavUserWithTeams } from '@/components/sidebar/nav-user-with-teams';
@@ -48,11 +48,10 @@ export function SidebarLeft({
   });
 
   const pathname = usePathname();
-  const { flags, loading: flagsLoading } = useFeatureFlags(['custom_agents', 'agent_marketplace', 'workflows']);
+  const { flags, loading: flagsLoading } = useFeatureFlags(['custom_agents', 'agent_marketplace']);
   const customAgentsEnabled = flags.custom_agents;
   const marketplaceEnabled = flags.agent_marketplace;
-  const workflowsEnabled = flags.workflows;
-
+  
   useEffect(() => {
     const fetchUserData = async () => {
       const supabase = createClient();
@@ -103,7 +102,6 @@ export function SidebarLeft({
           </Link>
           {state !== 'collapsed' && (
             <div className="ml-2 transition-all duration-200 ease-in-out whitespace-nowrap">
-              {/* <span className="font-semibold"> SUNA</span> */}
             </div>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -134,22 +132,20 @@ export function SidebarLeft({
       <SidebarContent className="[&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none']">
         {!flagsLoading && (customAgentsEnabled || marketplaceEnabled) && (
           <SidebarGroup>
-            {customAgentsEnabled && (
-              <Link href="/agents">
-                <SidebarMenuButton className={cn({
-                  'bg-primary/10 font-medium': pathname === '/agents',
-                })}>
-                  <Bot className="h-4 w-4 mr-2" />
-                  <span className="flex items-center justify-between w-full">
-                    Agent Playground
-                  </span>
-                </SidebarMenuButton>
-              </Link>
-            )}
+            <Link href="/dashboard">
+              <SidebarMenuButton className={cn({
+                'bg-accent text-accent-foreground font-medium': pathname === '/dashboard',
+              })}>
+                <Plus className="h-4 w-4 mr-2" />
+                <span className="flex items-center justify-between w-full">
+                  New Task
+                </span>
+              </SidebarMenuButton>
+            </Link>
             {marketplaceEnabled && (
               <Link href="/marketplace">
                 <SidebarMenuButton className={cn({
-                  'bg-primary/10 font-medium': pathname === '/marketplace',
+                  'bg-accent text-accent-foreground font-medium': pathname === '/marketplace',
                 })}>
                   <Store className="h-4 w-4 mr-2" />
                   <span className="flex items-center justify-between w-full">
@@ -159,25 +155,25 @@ export function SidebarLeft({
               </Link>
             )}
             {customAgentsEnabled && (
-              <Link href="/settings/credentials">
+              <Link href="/agents">
                 <SidebarMenuButton className={cn({
-                  'bg-primary/10 font-medium': pathname === '/settings/credentials',
+                  'bg-accent text-accent-foreground font-medium': pathname === '/agents',
                 })}>
-                  <Key className="h-4 w-4 mr-2" />
+                  <Bot className="h-4 w-4 mr-2" />
                   <span className="flex items-center justify-between w-full">
-                    Credentials
+                  Agents
                   </span>
                 </SidebarMenuButton>
               </Link>
             )}
-            {workflowsEnabled && (
-              <Link href="/workflows">
+            {customAgentsEnabled && (
+              <Link href="/settings/credentials">
                 <SidebarMenuButton className={cn({
-                  'bg-primary/10 font-medium': pathname === '/workflows',
+                  'bg-accent text-accent-foreground font-medium': pathname === '/settings/credentials',
                 })}>
-                  <Workflow className="h-4 w-4 mr-2" />
+                  <Key className="h-4 w-4 mr-2" />
                   <span className="flex items-center justify-between w-full">
-                    Workflows
+                    Credentials
                   </span>
                 </SidebarMenuButton>
               </Link>

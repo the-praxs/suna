@@ -11,7 +11,7 @@ This module provides comprehensive conversation management, including:
 """
 
 import json
-from typing import List, Dict, Any, Optional, Type, Union, AsyncGenerator, Literal
+from typing import List, Dict, Any, Optional, Type, Union, AsyncGenerator, Literal, cast
 from services.llm import make_llm_api_call
 from agentpress.tool import Tool
 from agentpress.tool_registry import ToolRegistry
@@ -25,7 +25,7 @@ from utils.logger import logger
 from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
-from litellm import token_counter
+from litellm.utils import token_counter
 from services.agentops import record_event, agentops_trace_context, get_current_trace_context
 from agentops import tracer
 from agentops.semconv import SpanKind, SpanAttributes
@@ -76,310 +76,6 @@ class ThreadManager:
         if self.agentops_trace:
             agentops_trace_context.set(self.agentops_trace)
 
-    def _is_tool_result_message(self, msg: Dict[str, Any]) -> bool:
-        if not ("content" in msg and msg['content']):
-            return False
-        content = msg['content']
-        if isinstance(content, str) and "ToolResult" in content: return True
-        if isinstance(content, dict) and "tool_execution" in content: return True
-        if isinstance(content, dict) and "interactive_elements" in content: return True
-        if isinstance(content, str):
-            try:
-                parsed_content = json.loads(content)
-                if isinstance(parsed_content, dict) and "tool_execution" in parsed_content: return True
-                if isinstance(parsed_content, dict) and "interactive_elements" in content: return True
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return False
-    
-    def _compress_message(self, msg_content: Union[str, dict], message_id: Optional[str] = None, max_length: int = 3000) -> Union[str, dict]:
-        """Compress the message content."""
-        # print("max_length", max_length)
-        if isinstance(msg_content, str):
-            if len(msg_content) > max_length:
-                return msg_content[:max_length] + "... (truncated)" + f"\n\nmessage_id \"{message_id}\"\nUse expand-message tool to see contents"
-            else:
-                return msg_content
-        elif isinstance(msg_content, dict):
-            if len(json.dumps(msg_content)) > max_length:
-                return json.dumps(msg_content)[:max_length] + "... (truncated)" + f"\n\nmessage_id \"{message_id}\"\nUse expand-message tool to see contents"
-            else:
-                return msg_content
-        
-    def _safe_truncate(self, msg_content: Union[str, dict], max_length: int = 100000) -> Union[str, dict]:
-        """Truncate the message content safely by removing the middle portion."""
-        max_length = min(max_length, 100000)
-        if isinstance(msg_content, str):
-            if len(msg_content) > max_length:
-                # Calculate how much to keep from start and end
-                keep_length = max_length - 150  # Reserve space for truncation message
-                start_length = keep_length // 2
-                end_length = keep_length - start_length
-                
-                start_part = msg_content[:start_length]
-                end_part = msg_content[-end_length:] if end_length > 0 else ""
-                
-                return start_part + f"\n\n... (middle truncated) ...\n\n" + end_part + f"\n\nThis message is too long, repeat relevant information in your response to remember it"
-            else:
-                return msg_content
-        elif isinstance(msg_content, dict):
-            json_str = json.dumps(msg_content)
-            if len(json_str) > max_length:
-                # Calculate how much to keep from start and end
-                keep_length = max_length - 150  # Reserve space for truncation message
-                start_length = keep_length // 2
-                end_length = keep_length - start_length
-                
-                start_part = json_str[:start_length]
-                end_part = json_str[-end_length:] if end_length > 0 else ""
-                
-                return start_part + f"\n\n... (middle truncated) ...\n\n" + end_part + f"\n\nThis message is too long, repeat relevant information in your response to remember it"
-            else:
-                return msg_content
-  
-    def _compress_tool_result_messages(self, messages: List[Dict[str, Any]], llm_model: str, max_tokens: Optional[int], token_threshold: Optional[int] = 1000) -> List[Dict[str, Any]]:
-        """Compress the tool result messages except the most recent one."""
-        uncompressed_total_token_count = token_counter(model=llm_model, messages=messages)
-
-        if uncompressed_total_token_count > (max_tokens or (100 * 1000)):
-            _i = 0 # Count the number of ToolResult messages
-            for msg in reversed(messages): # Start from the end and work backwards
-                if self._is_tool_result_message(msg): # Only compress ToolResult messages
-                    _i += 1 # Count the number of ToolResult messages
-                    msg_token_count = token_counter(messages=[msg]) # Count the number of tokens in the message
-                    if msg_token_count > token_threshold: # If the message is too long
-                        if _i > 1: # If this is not the most recent ToolResult message
-                            message_id = msg.get('message_id') # Get the message_id
-                            if message_id:
-                                msg["content"] = self._compress_message(msg["content"], message_id, token_threshold * 3)
-                            else:
-                                logger.warning(f"UNEXPECTED: Message has no message_id {str(msg)[:100]}")
-                        else:
-                            msg["content"] = self._safe_truncate(msg["content"], int(max_tokens * 2))
-        return messages
-
-    def _compress_user_messages(self, messages: List[Dict[str, Any]], llm_model: str, max_tokens: Optional[int], token_threshold: Optional[int] = 1000) -> List[Dict[str, Any]]:
-        """Compress the user messages except the most recent one."""
-        uncompressed_total_token_count = token_counter(model=llm_model, messages=messages)
-
-        if uncompressed_total_token_count > (max_tokens or (100 * 1000)):
-            _i = 0 # Count the number of User messages
-            for msg in reversed(messages): # Start from the end and work backwards
-                if msg.get('role') == 'user': # Only compress User messages
-                    _i += 1 # Count the number of User messages
-                    msg_token_count = token_counter(messages=[msg]) # Count the number of tokens in the message
-                    if msg_token_count > token_threshold: # If the message is too long
-                        if _i > 1: # If this is not the most recent User message
-                            message_id = msg.get('message_id') # Get the message_id
-                            if message_id:
-                                msg["content"] = self._compress_message(msg["content"], message_id, token_threshold * 3)
-                            else:
-                                logger.warning(f"UNEXPECTED: Message has no message_id {str(msg)[:100]}")
-                        else:
-                            msg["content"] = self._safe_truncate(msg["content"], int(max_tokens * 2))
-        return messages
-
-    def _compress_assistant_messages(self, messages: List[Dict[str, Any]], llm_model: str, max_tokens: Optional[int], token_threshold: Optional[int] = 1000) -> List[Dict[str, Any]]:
-        """Compress the assistant messages except the most recent one."""
-        uncompressed_total_token_count = token_counter(model=llm_model, messages=messages)
-        if uncompressed_total_token_count > (max_tokens or (100 * 1000)):
-            _i = 0 # Count the number of Assistant messages
-            for msg in reversed(messages): # Start from the end and work backwards
-                if msg.get('role') == 'assistant': # Only compress Assistant messages
-                    _i += 1 # Count the number of Assistant messages
-                    msg_token_count = token_counter(messages=[msg]) # Count the number of tokens in the message
-                    if msg_token_count > token_threshold: # If the message is too long
-                        if _i > 1: # If this is not the most recent Assistant message
-                            message_id = msg.get('message_id') # Get the message_id
-                            if message_id:
-                                msg["content"] = self._compress_message(msg["content"], message_id, token_threshold * 3)
-                            else:
-                                logger.warning(f"UNEXPECTED: Message has no message_id {str(msg)[:100]}")
-                        else:
-                            msg["content"] = self._safe_truncate(msg["content"], int(max_tokens * 2))
-                            
-        return messages
-
-
-    def _remove_meta_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove meta messages from the messages."""
-        result: List[Dict[str, Any]] = []
-        for msg in messages:
-            msg_content = msg.get('content')
-            # Try to parse msg_content as JSON if it's a string
-            if isinstance(msg_content, str):
-                try: msg_content = json.loads(msg_content)
-                except json.JSONDecodeError: pass
-            if isinstance(msg_content, dict):
-                # Create a copy to avoid modifying the original
-                msg_content_copy = msg_content.copy()
-                if "tool_execution" in msg_content_copy:
-                    tool_execution = msg_content_copy["tool_execution"].copy()
-                    if "arguments" in tool_execution:
-                        del tool_execution["arguments"]
-                    msg_content_copy["tool_execution"] = tool_execution
-                # Create a new message dict with the modified content
-                new_msg = msg.copy()
-                new_msg["content"] = json.dumps(msg_content_copy)
-                result.append(new_msg)
-            else:
-                result.append(msg)
-        return result
-
-    def _compress_messages(self, messages: List[Dict[str, Any]], llm_model: str, max_tokens: Optional[int] = 41000, token_threshold: Optional[int] = 4096, max_iterations: int = 5) -> List[Dict[str, Any]]:
-        """Compress the messages.
-            token_threshold: must be a power of 2
-        """
-        # Create a span for message compression only if we have a trace context
-        span = None
-        trace_context = get_current_trace_context()
-        if trace_context and tracer.initialized:
-            span, _, token = tracer.make_span(
-                "message_compression",
-                SpanKind.OPERATION,
-                attributes={
-                    "operation.name": "message_compression",
-                    "compression.model": llm_model,
-                    "compression.max_tokens": max_tokens,
-                    "compression.token_threshold": token_threshold
-                }
-            )
-
-        if 'sonnet' in llm_model.lower():
-            max_tokens = 200 * 1000 - 64000 - 28000
-        elif 'gpt' in llm_model.lower():
-            max_tokens = 128 * 1000 - 28000
-        elif 'gemini' in llm_model.lower():
-            max_tokens = 1000 * 1000 - 300000
-        elif 'deepseek' in llm_model.lower():
-            max_tokens = 128 * 1000 - 28000
-        else:
-            max_tokens = 41 * 1000 - 10000
-
-        result = messages
-        result = self._remove_meta_messages(result)
-
-        uncompressed_total_token_count = token_counter(model=llm_model, messages=result)
-        
-        # Set input token count
-        if span:
-            span.set_attribute(SpanAttributes.AGENTOPS_ENTITY_INPUT, uncompressed_total_token_count)
-            span.set_attribute("compression.input_tokens", uncompressed_total_token_count)
-
-        result = self._compress_tool_result_messages(result, llm_model, max_tokens, token_threshold)
-        result = self._compress_user_messages(result, llm_model, max_tokens, token_threshold)
-        result = self._compress_assistant_messages(result, llm_model, max_tokens, token_threshold)
-
-        compressed_token_count = token_counter(model=llm_model, messages=result)
-        
-        # Set output token count and compression ratio
-        if span:
-            span.set_attribute(SpanAttributes.AGENTOPS_ENTITY_OUTPUT, compressed_token_count)
-            span.set_attribute("compression.output_tokens", compressed_token_count)
-            compression_ratio = (1 - compressed_token_count / uncompressed_total_token_count) * 100 if uncompressed_total_token_count > 0 else 0
-            span.set_attribute("compression.ratio_percent", round(compression_ratio, 2))
-            span.set_attribute("compression.tokens_saved", uncompressed_total_token_count - compressed_token_count)
-
-        logger.info(f"_compress_messages: {uncompressed_total_token_count} -> {compressed_token_count}") # Log the token compression for debugging later
-
-        if max_iterations <= 0:
-            logger.warning(f"_compress_messages: Max iterations reached, omitting messages")
-            result = self._compress_messages_by_omitting_messages(messages, llm_model, max_tokens)
-            return result
-
-        if (compressed_token_count > max_tokens):
-            logger.warning(f"Further token compression is needed: {compressed_token_count} > {max_tokens}")
-            result = self._compress_messages(messages, llm_model, max_tokens, int(token_threshold / 2), max_iterations - 1)
-
-        # End the compression span
-        if span:
-            span.end()
-
-        return self._middle_out_messages(result)
-    
-    def _compress_messages_by_omitting_messages(
-            self, 
-            messages: List[Dict[str, Any]], 
-            llm_model: str, 
-            max_tokens: Optional[int] = 41000,
-            removal_batch_size: int = 10,
-            min_messages_to_keep: int = 10
-        ) -> List[Dict[str, Any]]:
-        """Compress the messages by omitting messages from the middle.
-        
-        Args:
-            messages: List of messages to compress
-            llm_model: Model name for token counting
-            max_tokens: Maximum allowed tokens
-            removal_batch_size: Number of messages to remove per iteration
-            min_messages_to_keep: Minimum number of messages to preserve
-        """
-        if not messages:
-            return messages
-            
-        result = messages
-        result = self._remove_meta_messages(result)
-
-        # Early exit if no compression needed
-        initial_token_count = token_counter(model=llm_model, messages=result)
-        max_allowed_tokens = max_tokens or (100 * 1000)
-        
-        if initial_token_count <= max_allowed_tokens:
-            return result
-
-        # Separate system message (assumed to be first) from conversation messages
-        system_message = messages[0] if messages and messages[0].get('role') == 'system' else None
-        conversation_messages = result[1:] if system_message else result
-        
-        safety_limit = 500
-        current_token_count = initial_token_count
-        
-        while current_token_count > max_allowed_tokens and safety_limit > 0:
-            safety_limit -= 1
-            
-            if len(conversation_messages) <= min_messages_to_keep:
-                logger.warning(f"Cannot compress further: only {len(conversation_messages)} messages remain (min: {min_messages_to_keep})")
-                break
-
-            # Calculate removal strategy based on current message count
-            if len(conversation_messages) > (removal_batch_size * 2):
-                # Remove from middle, keeping recent and early context
-                middle_start = len(conversation_messages) // 2 - (removal_batch_size // 2)
-                middle_end = middle_start + removal_batch_size
-                conversation_messages = conversation_messages[:middle_start] + conversation_messages[middle_end:]
-            else:
-                # Remove from earlier messages, preserving recent context
-                messages_to_remove = min(removal_batch_size, len(conversation_messages) // 2)
-                if messages_to_remove > 0:
-                    conversation_messages = conversation_messages[messages_to_remove:]
-                else:
-                    # Can't remove any more messages
-                    break
-
-            # Recalculate token count
-            messages_to_count = ([system_message] + conversation_messages) if system_message else conversation_messages
-            current_token_count = token_counter(model=llm_model, messages=messages_to_count)
-
-        # Prepare final result
-        final_messages = ([system_message] + conversation_messages) if system_message else conversation_messages
-        final_token_count = token_counter(model=llm_model, messages=final_messages)
-        
-        logger.info(f"_compress_messages_by_omitting_messages: {initial_token_count} -> {final_token_count} tokens ({len(messages)} -> {len(final_messages)} messages)")
-            
-        return final_messages
-    
-    def _middle_out_messages(self, messages: List[Dict[str, Any]], max_messages: int = 320) -> List[Dict[str, Any]]:
-        """Remove messages from the middle of the list, keeping max_messages total."""
-        if len(messages) <= max_messages:
-            return messages
-        
-        # Keep half from the beginning and half from the end
-        keep_start = max_messages // 2
-        keep_end = max_messages - keep_start
-        
-        return messages[:keep_start] + messages[-keep_end:]
-
-
     def add_tool(self, tool_class: Type[Tool], function_names: Optional[List[str]] = None, **kwargs):
         """Add a tool to the ThreadManager."""
         self.tool_registry.register_tool(tool_class, function_names, **kwargs)
@@ -427,8 +123,8 @@ class ThreadManager:
             data_to_insert['agent_version_id'] = agent_version_id
 
         try:
-            # Add returning='representation' to get the inserted row data including the id
-            result = await client.table('messages').insert(data_to_insert, returning='representation').execute()
+            # Insert the message and get the inserted row data including the id
+            result = await client.table('messages').insert(data_to_insert).execute()
             logger.info(f"Successfully added message to thread {thread_id}")
 
             if result.data and len(result.data) > 0 and isinstance(result.data[0], dict) and 'message_id' in result.data[0]:
@@ -559,6 +255,9 @@ class ThreadManager:
 
         # Log model info
         logger.info(f"🤖 Thread {thread_id}: Using model {llm_model}")
+
+        # Ensure processor_config is not None
+        config = processor_config or ProcessorConfig()
         
         # Record thread execution start event
         record_event(
@@ -581,14 +280,14 @@ class ThreadManager:
         )
 
         # Apply max_xml_tool_calls if specified and not already set in config
-        if max_xml_tool_calls > 0 and not processor_config.max_xml_tool_calls:
-            processor_config.max_xml_tool_calls = max_xml_tool_calls
+        if max_xml_tool_calls > 0 and not config.max_xml_tool_calls:
+            config.max_xml_tool_calls = max_xml_tool_calls
 
         # Create a working copy of the system prompt to potentially modify
         working_system_prompt = system_prompt.copy()
 
         # Add XML examples to system prompt if requested, do this only ONCE before the loop
-        if include_xml_examples and processor_config.xml_tool_calling:
+        if include_xml_examples and config.xml_tool_calling:
             xml_examples = self.tool_registry.get_xml_examples()
             if xml_examples:
                 examples_content = """
@@ -636,9 +335,9 @@ Here are the XML tools available with examples:
         # Define inner function to handle a single run
         async def _run_once(temp_msg=None):
             try:
-                # Ensure processor_config is available in this scope
-                nonlocal processor_config
-                # Note: processor_config is now guaranteed to exist due to check above
+                # Ensure config is available in this scope
+                nonlocal config
+                # Note: config is now guaranteed to exist due to check above
 
                 # 1. Get messages from thread for LLM call
                 messages = await self.get_llm_messages(thread_id)
@@ -650,25 +349,6 @@ Here are the XML tools available with examples:
                     token_count = token_counter(model=llm_model, messages=[working_system_prompt] + messages)
                     token_threshold = self.context_manager.token_threshold
                     logger.info(f"Thread {thread_id} token count: {token_count}/{token_threshold} ({(token_count/token_threshold)*100:.1f}%)")
-
-                    # if token_count >= token_threshold and enable_context_manager:
-                    #     logger.info(f"Thread token count ({token_count}) exceeds threshold ({token_threshold}), summarizing...")
-                    #     summarized = await self.context_manager.check_and_summarize_if_needed(
-                    #         thread_id=thread_id,
-                    #         add_message_callback=self.add_message,
-                    #         model=llm_model,
-                    #         force=True
-                    #     )
-                    #     if summarized:
-                    #         logger.info("Summarization complete, fetching updated messages with summary")
-                    #         messages = await self.get_llm_messages(thread_id)
-                    #         # Recount tokens after summarization, using the modified prompt
-                    #         new_token_count = token_counter(model=llm_model, messages=[working_system_prompt] + messages)
-                    #         logger.info(f"After summarization: token count reduced from {token_count} to {new_token_count}")
-                    #     else:
-                    #         logger.warning("Summarization failed or wasn't needed - proceeding with original messages")
-                    # elif not enable_context_manager:
-                    #     logger.info("Automatic summarization disabled. Skipping token count check and summarization.")
 
                 except Exception as e:
                     logger.error(f"Error counting tokens or summarizing: {str(e)}")
@@ -698,11 +378,11 @@ Here are the XML tools available with examples:
 
                 # 4. Prepare tools for LLM call
                 openapi_tool_schemas = None
-                if processor_config.native_tool_calling:
+                if config.native_tool_calling:
                     openapi_tool_schemas = self.tool_registry.get_openapi_schemas()
                     logger.debug(f"Retrieved {len(openapi_tool_schemas) if openapi_tool_schemas else 0} OpenAPI tool schemas")
 
-                prepared_messages = self._compress_messages(prepared_messages, llm_model)
+                prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
 
                 # 5. Make LLM API call
                 logger.debug("Making LLM API call")
@@ -743,7 +423,7 @@ Here are the XML tools available with examples:
                         temperature=llm_temperature,
                         max_tokens=llm_max_tokens,
                         tools=openapi_tool_schemas,
-                        tool_choice=tool_choice if processor_config.native_tool_calling else None,
+                        tool_choice=tool_choice if config.native_tool_calling else "none",
                         stream=stream,
                         enable_thinking=enable_thinking,
                         reasoning_effort=reasoning_effort,
@@ -787,13 +467,24 @@ Here are the XML tools available with examples:
                 # 6. Process LLM response using the ResponseProcessor
                 if stream:
                     logger.debug("Processing streaming response")
-                    response_generator = self.response_processor.process_streaming_response(
-                        llm_response=llm_response,
-                        thread_id=thread_id,
-                        config=processor_config,
-                        prompt_messages=prepared_messages,
-                        llm_model=llm_model,
-                        llm_span_context=llm_span_context,  # Pass span context for token recording
+                    # Ensure we have an async generator for streaming
+                    if hasattr(llm_response, '__aiter__'):
+                        response_generator = self.response_processor.process_streaming_response(
+                            llm_response=cast(AsyncGenerator, llm_response),
+                            thread_id=thread_id,
+                            config=config,
+                            prompt_messages=prepared_messages,
+                            llm_model=llm_model,
+                        )
+                    else:
+                        # Fallback to non-streaming if response is not iterable
+                        response_generator = self.response_processor.process_non_streaming_response(
+                            llm_response=llm_response,
+                            thread_id=thread_id,
+                            config=config,
+                            prompt_messages=prepared_messages,
+                            llm_model=llm_model,
+                            llm_span_context=llm_span_context,  # Pass span context for token recording
                     )
 
                     return response_generator
@@ -803,7 +494,7 @@ Here are the XML tools available with examples:
                     response_generator = self.response_processor.process_non_streaming_response(
                         llm_response=llm_response,
                         thread_id=thread_id,
-                        config=processor_config,
+                        config=config,
                         prompt_messages=prepared_messages,
                         llm_model=llm_model,
                     )
@@ -849,14 +540,15 @@ Here are the XML tools available with examples:
 
                     # Process each chunk
                     try:
-                        async for chunk in response_gen:
-                            # Check if this is a finish reason chunk with tool_calls or xml_tool_limit_reached
-                            if chunk.get('type') == 'finish':
-                                if chunk.get('finish_reason') == 'tool_calls':
-                                    # Only auto-continue if enabled (max > 0)
-                                    if native_max_auto_continues > 0:
-                                        logger.info(f"Detected finish_reason='tool_calls', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
-                                        record_event(
+                        if hasattr(response_gen, '__aiter__'):
+                            async for chunk in cast(AsyncGenerator, response_gen):
+                                # Check if this is a finish reason chunk with tool_calls or xml_tool_limit_reached
+                                if chunk.get('type') == 'finish':
+                                    if chunk.get('finish_reason') == 'tool_calls':
+                                        # Only auto-continue if enabled (max > 0)
+                                        if native_max_auto_continues > 0:
+                                            logger.info(f"Detected finish_reason='tool_calls', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
+                                            record_event(
                                             name="auto_continue_triggered",
                                             level="DEFAULT",
                                             message=f"Auto-continuing due to tool_calls ({auto_continue_count + 1}/{native_max_auto_continues})",
@@ -868,13 +560,13 @@ Here are the XML tools available with examples:
                                             }
                                         )
                                         auto_continue = True
-                                        auto_continue_count += 1
-                                        # Don't yield the finish chunk to avoid confusing the client
-                                        continue
-                                elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
-                                    # Don't auto-continue if XML tool limit was reached
-                                    logger.info("Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
-                                    record_event(
+                                            auto_continue_count += 1
+                                            # Don't yield the finish chunk to avoid confusing the client
+                                            continue
+                                    elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
+                                        # Don't auto-continue if XML tool limit was reached
+                                        logger.info("Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
+                                        record_event(
                                         name="auto_continue_stopped",
                                         level="WARNING",
                                         message="Auto-continue stopped due to XML tool limit",
@@ -884,10 +576,13 @@ Here are the XML tools available with examples:
                                         }
                                     )
                                     auto_continue = False
-                                    # Still yield the chunk to inform the client
+                                        # Still yield the chunk to inform the client
 
-                            # Otherwise just yield the chunk normally
-                            yield chunk
+                                # Otherwise just yield the chunk normally
+                                yield chunk
+                        else:
+                            # response_gen is not iterable (likely an error dict), yield it directly
+                            yield response_gen
 
                         # If not auto-continuing, we're done
                         if not auto_continue:
