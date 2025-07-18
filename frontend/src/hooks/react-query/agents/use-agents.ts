@@ -4,6 +4,9 @@ import { toast } from 'sonner';
 import { agentKeys } from './keys';
 import { Agent, AgentUpdateRequest, AgentsParams, createAgent, deleteAgent, getAgent, getAgents, getThreadAgent, updateAgent, AgentBuilderChatRequest, AgentBuilderStreamData, startAgentBuilderChat, getAgentBuilderChatHistory } from './utils';
 import { useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { generateRandomAvatar } from '@/lib/utils/_avatar-generator';
+import { DEFAULT_AGENTPRESS_TOOLS } from '@/components/agents/tools';
 
 export const useAgents = (params: AgentsParams = {}) => {
   return createQueryHook(
@@ -37,8 +40,46 @@ export const useCreateAgent = () => {
       onSuccess: (data) => {
         queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
         queryClient.setQueryData(agentKeys.detail(data.agent_id), data);
-        
         toast.success('Agent created successfully');
+      },
+    }
+  )();
+};
+
+export const useCreateNewAgent = () => {
+  const router = useRouter();
+  const createAgentMutation = useCreateAgent();
+  
+  return createMutationHook(
+    async (_: void) => {
+      const { avatar, avatar_color } = generateRandomAvatar();
+      
+      const defaultAgentData = {
+        name: 'New Agent',
+        description: '',
+        system_prompt: 'You are a helpful assistant. Provide clear, accurate, and helpful responses to user queries.',
+        avatar,
+        avatar_color,
+        configured_mcps: [],
+        agentpress_tools: Object.fromEntries(
+          Object.entries(DEFAULT_AGENTPRESS_TOOLS).map(([key, value]) => [
+            key, 
+            { enabled: value.enabled, description: value.description }
+          ])
+        ),
+        is_default: false,
+      };
+
+      const newAgent = await createAgentMutation.mutateAsync(defaultAgentData);
+      return newAgent;
+    },
+    {
+      onSuccess: (newAgent) => {
+        router.push(`/agents/config/${newAgent.agent_id}`);
+      },
+      onError: (error) => {
+        console.error('Error creating agent:', error);
+        toast.error('Failed to create agent. Please try again.');
       },
     }
   )();
@@ -54,6 +95,12 @@ export const useUpdateAgent = () => {
       onSuccess: (data, variables) => {
         queryClient.setQueryData(agentKeys.detail(variables.agentId), data);
         queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
+        if (variables.configured_mcps !== undefined || variables.custom_mcps !== undefined) {
+          queryClient.invalidateQueries({ queryKey: ['agent-tools', variables.agentId] });
+          queryClient.invalidateQueries({ queryKey: ['pipedream-tools', variables.agentId] });
+          queryClient.invalidateQueries({ queryKey: ['custom-mcp-tools', variables.agentId] });
+          queryClient.invalidateQueries({ queryKey: ['pipedream', 'available-tools'] });
+        }
       },
     }
   )();

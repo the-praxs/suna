@@ -7,14 +7,16 @@ import { UploadedFile } from './chat-input';
 import { FileUploadHandler } from './file-upload-handler';
 import { VoiceRecorder } from './voice-recorder';
 import { ModelSelector } from './model-selector';
-import { ChatSettingsDropdown } from './chat-settings-dropdown';
-import { SubscriptionStatus } from './_use-model-selection';
+import { AgentSelector } from './agent-selector';
+import { canAccessModel, SubscriptionStatus } from './_use-model-selection';
 import { isLocalMode } from '@/lib/config';
 import { useFeatureFlag } from '@/lib/feature-flags';
 import { TooltipContent } from '@/components/ui/tooltip';
 import { Tooltip } from '@/components/ui/tooltip';
 import { TooltipProvider, TooltipTrigger } from '@radix-ui/react-tooltip';
 import { BillingModal } from '@/components/billing/billing-modal';
+import ChatDropdown from './chat-dropdown';
+import { handleFiles } from './file-upload-handler';
 
 interface MessageInputProps {
   value: string;
@@ -37,6 +39,7 @@ interface MessageInputProps {
   setIsUploading: React.Dispatch<React.SetStateAction<boolean>>;
   hideAttachments?: boolean;
   messages?: any[]; // Add messages prop
+  isLoggedIn?: boolean;
 
   selectedModel: string;
   onModelChange: (model: string) => void;
@@ -46,6 +49,8 @@ interface MessageInputProps {
   refreshCustomModels?: () => void;
   selectedAgentId?: string;
   onAgentSelect?: (agentId: string | undefined) => void;
+  enableAdvancedConfig?: boolean;
+  hideAgentSelection?: boolean;
 }
 
 export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
@@ -71,6 +76,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       setIsUploading,
       hideAttachments = false,
       messages = [],
+      isLoggedIn = true,
 
       selectedModel,
       onModelChange,
@@ -81,6 +87,8 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
 
       selectedAgentId,
       onAgentSelect,
+      enableAdvancedConfig = false,
+      hideAgentSelection = false,
     },
     ref,
   ) => {
@@ -122,6 +130,58 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       }
     };
 
+    const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!e.clipboardData) return;
+      const items = Array.from(e.clipboardData.items);
+      const imageFiles: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        handleFiles(
+          imageFiles,
+          sandboxId,
+          setPendingFiles,
+          setUploadedFiles,
+          setIsUploading,
+          messages,
+        );
+      }
+    };
+
+    const renderDropdown = () => {
+      if (isLoggedIn) {
+        const showAdvancedFeatures = enableAdvancedConfig || (customAgentsEnabled && !flagsLoading);
+        
+        return (
+          <div className="flex items-center gap-2">
+            {showAdvancedFeatures && !hideAgentSelection && (
+              <AgentSelector
+                selectedAgentId={selectedAgentId}
+                onAgentSelect={onAgentSelect}
+                disabled={loading || (disabled && !isAgentRunning)}
+              />
+            )}
+            <ModelSelector
+              selectedModel={selectedModel}
+              onModelChange={onModelChange}
+              modelOptions={modelOptions}
+              subscriptionStatus={subscriptionStatus}
+              canAccessModel={canAccessModel}
+              refreshCustomModels={refreshCustomModels}
+              billingModalOpen={billingModalOpen}
+              setBillingModalOpen={setBillingModalOpen}
+            />
+          </div>
+        );
+      }
+      return <ChatDropdown />;
+    }
+
     return (
       <div className="relative flex flex-col w-full h-full gap-2 justify-between">
 
@@ -131,6 +191,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
             value={value}
             onChange={onChange}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder={placeholder}
             className={cn(
               'w-full bg-transparent dark:bg-transparent border-none shadow-none focus-visible:ring-0 px-0.5 pb-6 pt-4 !text-[15px] min-h-[36px] max-h-[200px] overflow-y-auto resize-none',
@@ -156,6 +217,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
                 setUploadedFiles={setUploadedFiles}
                 setIsUploading={setIsUploading}
                 messages={messages}
+                isLoggedIn={isLoggedIn}
               />
             )}
 
@@ -175,43 +237,17 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
           }
 
           <div className='flex items-center gap-2'>
-            {/* Show model selector inline if custom agents are disabled, otherwise show settings dropdown */}
-            {!customAgentsEnabled || flagsLoading ? (
-              <ModelSelector
-                selectedModel={selectedModel}
-                onModelChange={onModelChange}
-                modelOptions={modelOptions}
-                subscriptionStatus={subscriptionStatus}
-                canAccessModel={canAccessModel}
-                refreshCustomModels={refreshCustomModels}
-                billingModalOpen={billingModalOpen}
-                setBillingModalOpen={setBillingModalOpen}
-              />
-            ) : (
-              <ChatSettingsDropdown
-                selectedAgentId={selectedAgentId}
-                onAgentSelect={onAgentSelect}
-                selectedModel={selectedModel}
-                onModelChange={onModelChange}
-                modelOptions={modelOptions}
-                subscriptionStatus={subscriptionStatus}
-                canAccessModel={canAccessModel}
-                refreshCustomModels={refreshCustomModels}
-                disabled={loading || (disabled && !isAgentRunning)}
-              />
-            )}
-
-            {/* Billing Modal */}
+            {renderDropdown()}
             <BillingModal
               open={billingModalOpen}
               onOpenChange={setBillingModalOpen}
               returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
             />
 
-            <VoiceRecorder
+            {isLoggedIn && <VoiceRecorder
               onTranscription={onTranscription}
               disabled={loading || (disabled && !isAgentRunning)}
-            />
+            />}
 
             <Button
               type="submit"

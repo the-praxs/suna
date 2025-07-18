@@ -163,6 +163,12 @@ def load_existing_env_vars():
                 "MCP_CREDENTIAL_ENCRYPTION_KEY", ""
             ),
         },
+        "pipedream": {
+            "PIPEDREAM_PROJECT_ID": backend_env.get("PIPEDREAM_PROJECT_ID", ""),
+            "PIPEDREAM_CLIENT_ID": backend_env.get("PIPEDREAM_CLIENT_ID", ""),
+            "PIPEDREAM_CLIENT_SECRET": backend_env.get("PIPEDREAM_CLIENT_SECRET", ""),
+            "PIPEDREAM_X_PD_ENVIRONMENT": backend_env.get("PIPEDREAM_X_PD_ENVIRONMENT", ""),
+        },
         "observability": {
             "AGENTOPS_API_KEY": backend_env.get("AGENTOPS_API_KEY", ""),
             "AGENTOPS_LOG_LEVEL": backend_env.get("AGENTOPS_LOG_LEVEL", "INFO"),
@@ -262,7 +268,8 @@ class SetupWizard:
             "slack": existing_env_vars["slack"],
             "webhook": existing_env_vars["webhook"],
             "mcp": existing_env_vars["mcp"],
-            "observability": existing_env_vars.get("observability", {}),
+            "pipedream": existing_env_vars["pipedream"],
+            "observability": existing_env_vars["observability"],
         }
 
         # Override with any progress data (in case user is resuming)
@@ -273,7 +280,7 @@ class SetupWizard:
             else:
                 self.env_vars[key] = value
 
-        self.total_steps = 17
+        self.total_steps = 18
 
     def show_current_config(self):
         """Shows the current configuration status."""
@@ -339,6 +346,12 @@ class SetupWizard:
         else:
             config_items.append(f"{Colors.YELLOW}○{Colors.ENDC} MCP encryption key")
 
+        # Check Pipedream configuration
+        if self.env_vars["pipedream"]["PIPEDREAM_PROJECT_ID"]:
+            config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} Pipedream (optional)")
+        else:
+            config_items.append(f"{Colors.CYAN}○{Colors.ENDC} Pipedream (optional)")
+
         # Check Slack configuration
         if self.env_vars["slack"]["SLACK_CLIENT_ID"]:
             config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} Slack (optional)")
@@ -351,7 +364,7 @@ class SetupWizard:
         else:
             config_items.append(f"{Colors.YELLOW}○{Colors.ENDC} Webhook")
 
-        # Check AgentOps observability (optional)
+        # Check observability configuration
         if self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY"):
             config_items.append(f"{Colors.GREEN}✓{Colors.ENDC} AgentOps (optional)")
         else:
@@ -384,13 +397,14 @@ class SetupWizard:
             self.run_step(8, self.collect_smithery_keys)
             self.run_step(9, self.collect_qstash_keys)
             self.run_step(10, self.collect_mcp_keys)
-            self.run_step(11, self.collect_slack_keys)
-            self.run_step(12, self.collect_webhook_keys)
-            self.run_step(13, self.collect_observability_keys)
-            self.run_step(14, self.configure_env_files)
-            self.run_step(15, self.setup_supabase_database)
-            self.run_step(16, self.install_dependencies)
-            self.run_step(17, self.start_suna)
+            self.run_step(11, self.collect_pipedream_keys)
+            self.run_step(12, self.collect_slack_keys)
+            self.run_step(13, self.collect_webhook_keys)
+            self.run_step(14, self.collect_observability_keys)
+            self.run_step(15, self.configure_env_files)
+            self.run_step(16, self.setup_supabase_database)
+            self.run_step(17, self.install_dependencies)
+            self.run_step(18, self.start_suna)
 
             self.final_instructions()
 
@@ -945,9 +959,69 @@ class SetupWizard:
 
         print_success("MCP configuration saved.")
 
+    def collect_pipedream_keys(self):
+        """Collects the optional Pipedream configuration."""
+        print_step(11, self.total_steps, "Collecting Pipedream Configuration (Optional)")
+
+        # Check if we already have values configured
+        has_existing = any(self.env_vars["pipedream"].values())
+        if has_existing:
+            print_info(
+                "Found existing Pipedream configuration. Press Enter to keep current values or type new ones."
+            )
+        else:
+            print_info("Pipedream enables workflow automation and MCP integrations.")
+            print_info("Create a Pipedream Connect project at https://pipedream.com/connect to get your credentials.")
+            print_info("You can skip this step and configure Pipedream later.")
+
+        # Ask if user wants to configure Pipedream
+        if not has_existing:
+            configure_pipedream = input("Do you want to configure Pipedream integration? (y/N): ").lower().strip()
+            if configure_pipedream != 'y':
+                print_info("Skipping Pipedream configuration.")
+                return
+
+        self.env_vars["pipedream"]["PIPEDREAM_PROJECT_ID"] = self._get_input(
+            "Enter your Pipedream Project ID (or press Enter to skip): ",
+            validate_api_key,
+            "Invalid Pipedream Project ID format. It should be a valid project ID.",
+            allow_empty=True,
+            default_value=self.env_vars["pipedream"]["PIPEDREAM_PROJECT_ID"],
+        )
+        
+        if self.env_vars["pipedream"]["PIPEDREAM_PROJECT_ID"]:
+            self.env_vars["pipedream"]["PIPEDREAM_CLIENT_ID"] = self._get_input(
+                "Enter your Pipedream Client ID: ",
+                validate_api_key,
+                "Invalid Pipedream Client ID format. It should be a valid client ID.",
+                default_value=self.env_vars["pipedream"]["PIPEDREAM_CLIENT_ID"],
+            )
+            
+            self.env_vars["pipedream"]["PIPEDREAM_CLIENT_SECRET"] = self._get_input(
+                "Enter your Pipedream Client Secret: ",
+                validate_api_key,
+                "Invalid Pipedream Client Secret format. It should be a valid client secret.",
+                default_value=self.env_vars["pipedream"]["PIPEDREAM_CLIENT_SECRET"],
+            )
+            
+            # Set default environment if not already configured
+            if not self.env_vars["pipedream"]["PIPEDREAM_X_PD_ENVIRONMENT"]:
+                self.env_vars["pipedream"]["PIPEDREAM_X_PD_ENVIRONMENT"] = "development"
+            
+            self.env_vars["pipedream"]["PIPEDREAM_X_PD_ENVIRONMENT"] = self._get_input(
+                "Enter your Pipedream Environment (development/production): ",
+                lambda x, allow_empty=False: x.lower() in ["development", "production"] or allow_empty,
+                "Invalid environment. Please enter 'development' or 'production'.",
+                default_value=self.env_vars["pipedream"]["PIPEDREAM_X_PD_ENVIRONMENT"],
+            )
+            
+            print_success("Pipedream configuration saved.")
+        else:
+            print_info("Skipping Pipedream configuration.")
+
     def collect_slack_keys(self):
         """Collects the optional Slack configuration."""
-        print_step(11, self.total_steps, "Collecting Slack Configuration (Optional)")
+        print_step(12, self.total_steps, "Collecting Slack Configuration (Optional)")
 
         # Check if we already have values configured
         has_existing = any(self.env_vars["slack"].values())
@@ -1000,7 +1074,7 @@ class SetupWizard:
 
     def collect_webhook_keys(self):
         """Collects the webhook configuration."""
-        print_step(12, self.total_steps, "Collecting Webhook Configuration")
+        print_step(13, self.total_steps, "Collecting Webhook Configuration")
 
         # Check if we already have values configured
         has_existing = bool(self.env_vars["webhook"]["WEBHOOK_BASE_URL"])
@@ -1025,7 +1099,7 @@ class SetupWizard:
 
     def collect_observability_keys(self):
         """Collects the optional AgentOps observability configuration."""
-        print_step(13, self.total_steps, "Collecting Observability Configuration (Optional)")
+        print_step(14, self.total_steps, "Collecting Observability Configuration (Optional)")
 
         # Check if we already have values configured
         existing_key = self.env_vars.get("observability", {}).get("AGENTOPS_API_KEY", "")
@@ -1077,7 +1151,7 @@ class SetupWizard:
 
     def configure_env_files(self):
         """Configures and writes the .env files for frontend and backend."""
-        print_step(14, self.total_steps, "Configuring Environment Files")
+        print_step(15, self.total_steps, "Configuring Environment Files")
 
         # --- Backend .env ---
         is_docker = self.env_vars["setup_method"] == "docker"
@@ -1099,7 +1173,8 @@ class SetupWizard:
             **self.env_vars["slack"],
             **self.env_vars["webhook"],
             **self.env_vars["mcp"],
-            **self.env_vars.get("observability", {}),
+            **self.env_vars["pipedream"],
+            **self.env_vars["observability"],
             **self.env_vars["daytona"],
             "NEXT_PUBLIC_URL": "http://localhost:3000",
         }
@@ -1133,7 +1208,7 @@ class SetupWizard:
 
     def setup_supabase_database(self):
         """Links the project to Supabase and pushes database migrations."""
-        print_step(15, self.total_steps, "Setting up Supabase Database")
+        print_step(16, self.total_steps, "Setting up Supabase Database")
 
         print_info(
             "This step will link your project to Supabase and push database migrations."
@@ -1232,7 +1307,7 @@ class SetupWizard:
 
     def install_dependencies(self):
         """Installs frontend and backend dependencies for manual setup."""
-        print_step(16, self.total_steps, "Installing Dependencies")
+        print_step(17, self.total_steps, "Installing Dependencies")
         if self.env_vars["setup_method"] == "docker":
             print_info(
                 "Skipping dependency installation for Docker setup (will be handled by Docker Compose)."
@@ -1274,7 +1349,7 @@ class SetupWizard:
 
     def start_suna(self):
         """Starts Suna using Docker Compose or shows instructions for manual startup."""
-        print_step(17, self.total_steps, "Starting Suna")
+        print_step(18, self.total_steps, "Starting Suna")
         if self.env_vars["setup_method"] == "docker":
             print_info("Starting Suna with Docker Compose...")
             try:
@@ -1347,7 +1422,7 @@ class SetupWizard:
             print(f"{Colors.CYAN}   cd frontend && npm run dev{Colors.ENDC}")
 
             print(f"\n{Colors.BOLD}3. Start Backend (in a new terminal):{Colors.ENDC}")
-            print(f"{Colors.CYAN}   cd backend && python run api.py{Colors.ENDC}")
+            print(f"{Colors.CYAN}   cd backend && uv run api.py{Colors.ENDC}")
 
             print(
                 f"\n{Colors.BOLD}4. Start Background Worker (in a new terminal):{Colors.ENDC}"

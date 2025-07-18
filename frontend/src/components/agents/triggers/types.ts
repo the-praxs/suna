@@ -1,7 +1,7 @@
 export interface TriggerProvider {
   provider_id: string;
   name: string;
-  description: string;
+  description?: string;
   trigger_type: string;
   webhook_enabled: boolean;
   config_schema: Record<string, any>;
@@ -63,6 +63,9 @@ export interface DiscordTriggerConfig {
 
 export interface ScheduleTriggerConfig {
   cron_expression: string;
-  agent_prompt: string;
+  execution_type: 'agent' | 'workflow';
+  agent_prompt?: string;
+  workflow_id?: string;
+  workflow_input?: Record<string, any>;
   timezone?: string;
 } 

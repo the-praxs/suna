@@ -1,12 +1,15 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Request, HTTPException, Response, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from services import redis
 import sentry
 from contextlib import asynccontextmanager
 from agentpress.thread_manager import ThreadManager
 from services.supabase import DBConnection
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 from utils.config import config, EnvMode
 import asyncio
 from utils.logger import logger, structlog
@@ -16,8 +19,9 @@ from typing import Dict, Any
 
 from pydantic import BaseModel
 import uuid
-# Import the agent API module
+
 from agent import api as agent_api
+
 from sandbox import api as sandbox_api
 from services import billing as billing_api
 from flags import api as feature_flags_api
@@ -25,10 +29,9 @@ from services import transcription as transcription_api
 import sys
 from services import email_api
 from triggers import api as triggers_api
+from triggers.endpoints.workflows import router as workflows_router
 from services.agentops import initialize_agentops
 
-
-load_dotenv()
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -59,6 +62,8 @@ async def lifespan(app: FastAPI):
             instance_id
         )
         
+        # Workflows are now initialized via triggers module
+        
         sandbox_api.initialize(db)
         
         # Initialize Redis connection
@@ -75,7 +80,13 @@ async def lifespan(app: FastAPI):
         
         # Initialize triggers API
         triggers_api.initialize(db)
-        unified_oauth_api.initialize(db)
+        
+        # Initialize workflows API (part of triggers module)
+        from triggers.endpoints.workflows import set_db_connection
+        set_db_connection(db)
+
+        # Initialize pipedream API
+        pipedream_api.initialize(db)
         
         yield
         
@@ -152,7 +163,7 @@ app.add_middleware(
     allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Project-Id"],
+    allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers"],
 )
 
 # Create a main API router
@@ -164,12 +175,12 @@ api_router.include_router(sandbox_api.router)
 api_router.include_router(billing_api.router)
 api_router.include_router(feature_flags_api.router)
 
-from mcp_service import api as mcp_api
-from mcp_service import secure_api as secure_mcp_api
-from mcp_service import template_api as template_api
+from mcp_module import api as mcp_api
+from credentials import api as credentials_api
+from templates import api as template_api
 
 api_router.include_router(mcp_api.router)
-api_router.include_router(secure_mcp_api.router, prefix="/secure-mcp")
+api_router.include_router(credentials_api.router, prefix="/secure-mcp")
 api_router.include_router(template_api.router, prefix="/templates")
 
 api_router.include_router(transcription_api.router)
@@ -178,15 +189,14 @@ api_router.include_router(email_api.router)
 from knowledge_base import api as knowledge_base_api
 api_router.include_router(knowledge_base_api.router)
 
-from triggers import api as triggers_api
-from triggers import unified_oauth_api
 api_router.include_router(triggers_api.router)
-api_router.include_router(unified_oauth_api.router)
+api_router.include_router(workflows_router, prefix="/workflows")
 
-# Add health check to API router
+from pipedream import api as pipedream_api
+api_router.include_router(pipedream_api.router)
+
 @api_router.get("/health")
 async def health_check():
-    """Health check endpoint to verify API is working."""
     logger.info("Health check endpoint called")
     return {
         "status": "ok", 
@@ -194,7 +204,27 @@ async def health_check():
         "instance_id": instance_id
     }
 
-# Include the main API router with /api prefix
+@api_router.get("/health-docker")
+async def health_check():
+    logger.info("Health docker check endpoint called")
+    try:
+        client = await redis.get_client()
+        await client.ping()
+        db = DBConnection()
+        await db.initialize()
+        db_client = await db.client
+        await db_client.table("threads").select("thread_id").limit(1).execute()
+        logger.info("Health docker check complete")
+        return {
+            "status": "ok", 
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instance_id": instance_id
+        }
+    except Exception as e:
+        logger.error(f"Failed health docker check: {e}")
+        raise HTTPException(status_code=500, detail="Health check failed")
+
+
 app.include_router(api_router, prefix="/api")
 
 

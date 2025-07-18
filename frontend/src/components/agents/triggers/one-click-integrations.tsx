@@ -2,14 +2,11 @@
 
 import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Loader2, ExternalLink, AlertCircle, Clock } from 'lucide-react';
-import { SlackIcon } from '@/components/ui/icons/slack';
-import { getTriggerIcon } from './utils';
+import { Loader2, AlertCircle, Clock } from 'lucide-react';
 import { TriggerConfigDialog } from './trigger-config-dialog';
-import { TriggerProvider, ScheduleTriggerConfig } from './types';
+import { TriggerProvider } from './types';
 import { Dialog } from '@/components/ui/dialog';
 import { 
-  useOAuthIntegrations, 
   useInstallOAuthIntegration, 
   useUninstallOAuthIntegration,
   useOAuthCallbackHandler 
@@ -26,11 +23,6 @@ interface OneClickIntegrationsProps {
 }
 
 const OAUTH_PROVIDERS = {
-  slack: {
-    name: 'Slack',
-    icon: <SlackIcon className="h-4 w-4" />,
-    isOAuth: true
-  },
   schedule: {
     name: 'Schedule',
     icon: <Clock className="h-4 w-4" color="#10b981" />,
@@ -44,8 +36,6 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
   agentId
 }) => {
   const [configuringSchedule, setConfiguringSchedule] = useState(false);
-  
-  const { data: integrationStatus, isLoading, error } = useOAuthIntegrations(agentId);
   const { data: triggers = [] } = useAgentTriggers(agentId);
   const installMutation = useInstallOAuthIntegration();
   const uninstallMutation = useUninstallOAuthIntegration();
@@ -76,7 +66,10 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
   const handleUninstall = async (provider: ProviderKey, triggerId?: string) => {
     if (provider === 'schedule' && triggerId) {
       try {
-        await deleteTriggerMutation.mutateAsync(triggerId);
+        await deleteTriggerMutation.mutateAsync({
+          triggerId,
+          agentId
+        });
         toast.success('Schedule trigger removed successfully');
       } catch (error) {
         toast.error('Failed to remove schedule trigger');
@@ -113,9 +106,6 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
     if (provider === 'schedule') {
       return triggers.find(trigger => trigger.trigger_type === 'schedule');
     }
-    return integrationStatus?.integrations.find(integration => 
-      integration.provider === provider
-    );
   };
 
   const isProviderInstalled = (provider: ProviderKey) => {
@@ -130,26 +120,9 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
     return integration?.trigger_id;
   };
 
-  if (error) {
-    return (
-      <div className="p-4 border border-destructive/20 bg-destructive/5 rounded-lg">
-        <div className="flex items-center space-x-3">
-          <AlertCircle className="h-5 w-5 text-destructive" />
-          <div>
-            <h3 className="text-lg font-semibold text-destructive">Error Loading Integrations</h3>
-            <p className="text-sm text-muted-foreground">
-              {error instanceof Error ? error.message : 'Failed to load integrations'}
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   const scheduleProvider: TriggerProvider = {
     provider_id: 'schedule',
     name: 'Schedule',
-    description: 'Schedule agent execution using cron expressions',
     trigger_type: 'schedule',
     webhook_enabled: true,
     config_schema: {}
@@ -160,7 +133,6 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
       <div className="flex flex-wrap gap-3">
         {Object.entries(OAUTH_PROVIDERS).map(([providerId, config]) => {
           const provider = providerId as ProviderKey;
-          const integration = getIntegrationForProvider(provider);
           const isInstalled = isProviderInstalled(provider);
           const isLoading = installMutation.isPending || uninstallMutation.isPending || 
                            (provider === 'schedule' && (createTriggerMutation.isPending || deleteTriggerMutation.isPending));
@@ -196,7 +168,6 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
           );
         })}
       </div>
-
       {configuringSchedule && (
         <Dialog open={configuringSchedule} onOpenChange={setConfiguringSchedule}>
           <TriggerConfigDialog
@@ -205,9 +176,10 @@ export const OneClickIntegrations: React.FC<OneClickIntegrationsProps> = ({
             onSave={handleScheduleSave}
             onCancel={() => setConfiguringSchedule(false)}
             isLoading={createTriggerMutation.isPending}
+            agentId={agentId}
           />
         </Dialog>
       )}
     </div>
   );
-}; 
+};

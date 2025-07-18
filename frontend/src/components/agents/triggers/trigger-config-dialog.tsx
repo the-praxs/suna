@@ -13,25 +13,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
 import { 
-  MessageSquare, 
-  Webhook, 
-  Clock, 
-  Mail,
-  Github,
-  Gamepad2,
   Activity,
-  Eye,
-  EyeOff,
   Copy,
   ExternalLink,
   Loader2
 } from 'lucide-react';
-import { TriggerProvider, TriggerConfiguration, TelegramTriggerConfig, SlackTriggerConfig, ScheduleTriggerConfig } from './types';
-import { TelegramTriggerConfigForm } from './providers/telegram-config';
-import { SlackTriggerConfigForm } from './providers/slack-config';
-import { WebhookTriggerConfigForm } from './providers/webhook-config';
+import { TriggerProvider, TriggerConfiguration, ScheduleTriggerConfig } from './types';
 import { ScheduleTriggerConfigForm } from './providers/schedule-config';
 import { getDialogIcon } from './utils';
 
@@ -42,6 +30,7 @@ interface TriggerConfigDialogProps {
   onSave: (config: any) => void;
   onCancel: () => void;
   isLoading?: boolean;
+  agentId: string;
 }
 
 export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
@@ -50,6 +39,7 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
   onSave,
   onCancel,
   isLoading = false,
+  agentId,
 }) => {
   const [name, setName] = useState(existingConfig?.name || '');
   const [description, setDescription] = useState(existingConfig?.description || '');
@@ -80,8 +70,14 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
       if (!config.cron_expression) {
         newErrors.cron_expression = 'Cron expression is required';
       }
-      if (!config.agent_prompt) {
-        newErrors.agent_prompt = 'Agent prompt is required';
+      if (config.execution_type === 'workflow') {
+        if (!config.workflow_id) {
+          newErrors.workflow_id = 'Workflow selection is required';
+        }
+      } else {
+        if (!config.agent_prompt) {
+          newErrors.agent_prompt = 'Agent prompt is required';
+        }
       }
     }
     setErrors(newErrors);
@@ -101,22 +97,6 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
 
   const renderProviderSpecificConfig = () => {
     switch (provider.provider_id) {
-      case 'telegram':
-        return (
-          <TelegramTriggerConfigForm
-            config={config as TelegramTriggerConfig}
-            onChange={setConfig}
-            errors={errors}
-          />
-        );
-      case 'slack':
-        return (
-          <SlackTriggerConfigForm
-            config={config as SlackTriggerConfig}
-            onChange={setConfig}
-            errors={errors}
-          />
-        );
       case 'schedule':
         return (
           <ScheduleTriggerConfigForm
@@ -124,17 +104,13 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
             config={config as ScheduleTriggerConfig}
             onChange={setConfig}
             errors={errors}
-          />
-        );
-      case 'webhook':
-      case 'github_webhook':
-      case 'discord':
-        return (
-          <WebhookTriggerConfigForm
-            provider={provider}
-            config={config}
-            onChange={setConfig}
-            errors={errors}
+            agentId={agentId}
+            name={name}
+            description={description}
+            onNameChange={setName}
+            onDescriptionChange={setDescription}
+            isActive={isActive}
+            onActiveChange={setIsActive}
           />
         );
       default:
@@ -148,7 +124,7 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
   };
 
   return (
-    <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+    <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
       <DialogHeader>
         <DialogTitle className="flex items-center space-x-3">
           <div className="p-2 rounded-lg bg-muted border">
@@ -163,49 +139,55 @@ export const TriggerConfigDialog: React.FC<TriggerConfigDialogProps> = ({
         </DialogDescription>
       </DialogHeader>
       <div className="flex-1 overflow-y-auto space-y-6 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="trigger-name">Name *</Label>
-            <Input
-              id="trigger-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Enter a name for this trigger"
-              className={errors.name ? 'border-destructive' : ''}
-            />
-            {errors.name && (
-              <p className="text-sm text-destructive">{errors.name}</p>
-            )}
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="trigger-description">Description</Label>
-            <Textarea
-              id="trigger-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Optional description for this trigger"
-              rows={2}
-            />
-          </div>
-          
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="trigger-active"
-              checked={isActive}
-              onCheckedChange={setIsActive}
-            />
-            <Label htmlFor="trigger-active">
-              Enable trigger immediately
-            </Label>
-          </div>
-        </div>
-        <div className="border-t pt-6">
-          <h3 className="text-sm font-medium mb-4">
-            {provider.name} Configuration
-          </h3>
-          {renderProviderSpecificConfig()}
-        </div>
+        {provider.provider_id === 'schedule' ? (
+          renderProviderSpecificConfig()
+        ) : (
+          <>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="trigger-name">Name *</Label>
+                <Input
+                  id="trigger-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Enter a name for this trigger"
+                  className={errors.name ? 'border-destructive' : ''}
+                />
+                {errors.name && (
+                  <p className="text-sm text-destructive">{errors.name}</p>
+                )}
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="trigger-description">Description</Label>
+                <Textarea
+                  id="trigger-description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional description for this trigger"
+                  rows={2}
+                />
+              </div>
+              
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="trigger-active"
+                  checked={isActive}
+                  onCheckedChange={setIsActive}
+                />
+                <Label htmlFor="trigger-active">
+                  Enable trigger immediately
+                </Label>
+              </div>
+            </div>
+            <div className="border-t pt-6">
+              <h3 className="text-sm font-medium mb-4">
+                {provider.name} Configuration
+              </h3>
+              {renderProviderSpecificConfig()}
+            </div>
+          </>
+        )}
         {provider.webhook_enabled && existingConfig?.webhook_url && (
           <div className="border-t pt-6">
             <h3 className="text-sm font-medium mb-4">Webhook Information</h3>
