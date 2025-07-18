@@ -26,6 +26,9 @@ from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
 from litellm.utils import token_counter
+from services.agentops import record_event, agentops_trace_context, get_current_trace_context
+from agentops import tracer
+from agentops.semconv import SpanKind, SpanAttributes
 
 # Type alias for tool choice
 ToolChoice = Literal["auto", "required", "none"]
@@ -38,7 +41,7 @@ class ThreadManager:
     XML-based tool execution patterns.
     """
 
-    def __init__(self, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None):
+    def __init__(self, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None, agentops_trace=None):
         """Initialize ThreadManager.
 
         Args:
@@ -46,6 +49,7 @@ class ThreadManager:
             is_agent_builder: Whether this is an agent builder session
             target_agent_id: ID of the agent being built (if in agent builder mode)
             agent_config: Optional agent configuration with version information
+            agentops_trace: Optional AgentOps trace context
         """
         self.db = DBConnection()
         self.tool_registry = ToolRegistry()
@@ -53,6 +57,7 @@ class ThreadManager:
         self.is_agent_builder = is_agent_builder
         self.target_agent_id = target_agent_id
         self.agent_config = agent_config
+        self.agentops_trace = agentops_trace
         if not self.trace:
             self.trace = langfuse.trace(name="anonymous:thread_manager")
         self.response_processor = ResponseProcessor(
@@ -61,9 +66,15 @@ class ThreadManager:
             trace=self.trace,
             is_agent_builder=self.is_agent_builder,
             target_agent_id=self.target_agent_id,
-            agent_config=self.agent_config
+            agent_config=self.agent_config,
+            agentops_trace=self.agentops_trace
         )
         self.context_manager = ContextManager()
+    
+    def _set_agentops_context(self):
+        """Set AgentOps context if available. Called at the start of major operations."""
+        if self.agentops_trace:
+            agentops_trace_context.set(self.agentops_trace)
 
     def add_tool(self, tool_class: Type[Tool], function_names: Optional[List[str]] = None, **kwargs):
         """Add a tool to the ThreadManager."""
@@ -233,6 +244,9 @@ class ThreadManager:
             An async generator yielding response chunks or error dict
         """
 
+        # Set AgentOps context at the start of thread execution
+        self._set_agentops_context()
+        
         logger.info(f"Starting thread execution for thread {thread_id}")
         logger.info(f"Using model: {llm_model}")
         # Log parameters
@@ -244,6 +258,26 @@ class ThreadManager:
 
         # Ensure processor_config is not None
         config = processor_config or ProcessorConfig()
+        
+        # Record thread execution start event
+        record_event(
+            name="thread_execution_started",
+            level="DEFAULT",
+            message=f"Started thread execution with model {llm_model}",
+            metadata={
+                "thread_id": thread_id,
+                "model": llm_model,
+                "temperature": llm_temperature,
+                "max_tokens": llm_max_tokens,
+                "stream": stream,
+                "tool_choice": tool_choice,
+                "native_max_auto_continues": native_max_auto_continues,
+                "max_xml_tool_calls": max_xml_tool_calls,
+                "enable_thinking": enable_thinking,
+                "reasoning_effort": reasoning_effort,
+                "enable_context_manager": enable_context_manager
+            }
+        )
 
         # Apply max_xml_tool_calls if specified and not already set in config
         if max_xml_tool_calls > 0 and not config.max_xml_tool_calls:
@@ -352,6 +386,21 @@ Here are the XML tools available with examples:
 
                 # 5. Make LLM API call
                 logger.debug("Making LLM API call")
+                
+                # Record LLM call start
+                record_event(
+                    name="llm_api_call_started",
+                    level="DEFAULT",
+                    message=f"Making LLM API call with {llm_model}",
+                    metadata={
+                        "thread_id": thread_id,
+                        "model": llm_model,
+                        "message_count": len(prepared_messages),
+                        "has_tools": bool(openapi_tool_schemas),
+                        "tool_count": len(openapi_tool_schemas) if openapi_tool_schemas else 0
+                    }
+                )
+                
                 try:
                     if generation:
                         generation.update(
@@ -367,7 +416,8 @@ Here are the XML tools available with examples:
                               "tools": openapi_tool_schemas,
                             }
                         )
-                    llm_response = await make_llm_api_call(
+                    # For streaming, request span context to be returned
+                    llm_result = await make_llm_api_call(
                         prepared_messages, # Pass the potentially modified messages
                         llm_model,
                         temperature=llm_temperature,
@@ -376,12 +426,42 @@ Here are the XML tools available with examples:
                         tool_choice=tool_choice if config.native_tool_calling else "none",
                         stream=stream,
                         enable_thinking=enable_thinking,
-                        reasoning_effort=reasoning_effort
+                        reasoning_effort=reasoning_effort,
+                        return_span_context=stream  # Return span context for streaming
                     )
+                    
+                    # Extract response and span context if streaming
+                    if stream and isinstance(llm_result, tuple):
+                        llm_response, llm_span_context = llm_result
+                        logger.info("📥 Received LLM response with span context for token recording")
+                    else:
+                        llm_response = llm_result
+                        llm_span_context = None
                     logger.debug("Successfully received raw LLM API response stream/object")
+                    
+                    record_event(
+                        name="llm_api_call_completed",
+                        level="DEFAULT",
+                        message="LLM API call completed successfully",
+                        metadata={
+                            "thread_id": thread_id,
+                            "model": llm_model,
+                            "stream": stream
+                        }
+                    )
 
                 except Exception as e:
                     logger.error(f"Failed to make LLM API call: {str(e)}", exc_info=True)
+                    record_event(
+                        name="llm_api_call_failed",
+                        level="ERROR",
+                        message=f"LLM API call failed: {str(e)}",
+                        metadata={
+                            "thread_id": thread_id,
+                            "model": llm_model,
+                            "error": str(e)
+                        }
+                    )
                     raise
 
                 # 6. Process LLM response using the ResponseProcessor
@@ -404,7 +484,8 @@ Here are the XML tools available with examples:
                             config=config,
                             prompt_messages=prepared_messages,
                             llm_model=llm_model,
-                        )
+                            llm_span_context=llm_span_context,  # Pass span context for token recording
+                    )
 
                     return response_generator
                 else:
@@ -421,6 +502,16 @@ Here are the XML tools available with examples:
 
             except Exception as e:
                 logger.error(f"Error in run_thread: {str(e)}", exc_info=True)
+                record_event(
+                    name="thread_execution_error",
+                    level="ERROR",
+                    message=f"Error in thread execution: {str(e)}",
+                    metadata={
+                        "thread_id": thread_id,
+                        "error": str(e),
+                        "error_type": type(e).__name__
+                    }
+                )
                 # Return the error as a dict to be handled by the caller
                 return {
                     "type": "status",
@@ -457,14 +548,34 @@ Here are the XML tools available with examples:
                                         # Only auto-continue if enabled (max > 0)
                                         if native_max_auto_continues > 0:
                                             logger.info(f"Detected finish_reason='tool_calls', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
-                                            auto_continue = True
+                                            record_event(
+                                            name="auto_continue_triggered",
+                                            level="DEFAULT",
+                                            message=f"Auto-continuing due to tool_calls ({auto_continue_count + 1}/{native_max_auto_continues})",
+                                            metadata={
+                                                "thread_id": thread_id,
+                                                "continue_count": auto_continue_count + 1,
+                                                "max_continues": native_max_auto_continues,
+                                                "reason": "tool_calls"
+                                            }
+                                        )
+                                        auto_continue = True
                                             auto_continue_count += 1
                                             # Don't yield the finish chunk to avoid confusing the client
                                             continue
                                     elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
                                         # Don't auto-continue if XML tool limit was reached
-                                        logger.info(f"Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
-                                        auto_continue = False
+                                        logger.info("Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
+                                        record_event(
+                                        name="auto_continue_stopped",
+                                        level="WARNING",
+                                        message="Auto-continue stopped due to XML tool limit",
+                                        metadata={
+                                            "thread_id": thread_id,
+                                            "reason": "xml_tool_limit_reached"
+                                        }
+                                    )
+                                    auto_continue = False
                                         # Still yield the chunk to inform the client
 
                                 # Otherwise just yield the chunk normally
@@ -505,6 +616,16 @@ Here are the XML tools available with examples:
             # If we've reached the max auto-continues, log a warning
             if auto_continue and auto_continue_count >= native_max_auto_continues:
                 logger.warning(f"Reached maximum auto-continue limit ({native_max_auto_continues}), stopping.")
+                record_event(
+                    name="auto_continue_limit_reached",
+                    level="WARNING",
+                    message=f"Reached maximum auto-continue limit of {native_max_auto_continues}",
+                    metadata={
+                        "thread_id": thread_id,
+                        "max_continues": native_max_auto_continues,
+                        "continue_count": auto_continue_count
+                    }
+                )
                 yield {
                     "type": "content",
                     "content": f"\n[Agent reached maximum auto-continue limit of {native_max_auto_continues}]"

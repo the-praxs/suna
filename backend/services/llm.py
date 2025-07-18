@@ -19,9 +19,11 @@ import litellm
 from litellm.files.main import ModelResponse
 from utils.logger import logger
 from utils.config import config
+from services.agentops import is_initialized as agentops_is_initialized, llm_span
 
 # litellm.set_verbose=True
 litellm.modify_params=True
+
 
 # Constants
 MAX_RETRIES = 2
@@ -45,6 +47,7 @@ def setup_api_keys() -> None:
             logger.debug(f"API key set for provider: {provider}")
         else:
             logger.warning(f"No API key found for provider: {provider}")
+    
 
     # Set up OpenRouter API base if not already set
     if config.OPENROUTER_API_KEY and config.OPENROUTER_API_BASE:
@@ -258,6 +261,7 @@ def prepare_params(
 
     return params
 
+
 async def make_llm_api_call(
     messages: List[Dict[str, Any]],
     model_name: str,
@@ -272,8 +276,9 @@ async def make_llm_api_call(
     top_p: Optional[float] = None,
     model_id: Optional[str] = None,
     enable_thinking: Optional[bool] = False,
-    reasoning_effort: Optional[str] = 'low'
-) -> Union[Dict[str, Any], AsyncGenerator, ModelResponse]:
+    reasoning_effort: Optional[str] = 'low',
+    return_span_context: bool = False
+) -> Union[Dict[str, Any], AsyncGenerator, ModelResponse, tuple]:
     """
     Make an API call to a language model using LiteLLM.
 
@@ -292,9 +297,10 @@ async def make_llm_api_call(
         model_id: Optional ARN for Bedrock inference profiles
         enable_thinking: Whether to enable thinking
         reasoning_effort: Level of reasoning effort
+        return_span_context: If True and streaming, returns (response, span_context) tuple
 
     Returns:
-        Union[Dict[str, Any], AsyncGenerator]: API response or stream
+        Union[Dict[str, Any], AsyncGenerator, tuple]: API response, stream, or (response, span_context) tuple
 
     Raises:
         LLMRetryError: If API call fails after retries
@@ -319,30 +325,67 @@ async def make_llm_api_call(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort
     )
-    last_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            logger.debug(f"Attempt {attempt + 1}/{MAX_RETRIES}")
-            # logger.debug(f"API request parameters: {json.dumps(params, indent=2)}")
+    
+    # Use AgentOps LLM span async context manager
+    # For streaming with span context return, use manual span ending
+    manual_end = stream and return_span_context
+    
+    async with llm_span(
+        model=model_name,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tools=tools,
+        top_p=top_p,
+        stream=stream,
+        reasoning_effort=reasoning_effort if enable_thinking else None,
+        response_format=response_format,
+        tool_choice=tool_choice if tools else None,
+        manual_end=manual_end
+    ) as span:
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.debug(f"Attempt {attempt + 1}/{MAX_RETRIES}")
+                # logger.debug(f"API request parameters: {json.dumps(params, indent=2)}")
 
-            response = await litellm.acompletion(**params)
-            logger.debug(f"Successfully received API response from {model_name}")
-            # logger.debug(f"Response: {response}")
-            return response
+                response = await litellm.acompletion(**params)
+                logger.debug(f"Successfully received API response from {model_name}")
+                
+                
+                # Record the response in AgentOps if span is available
+                if span and not manual_end:
+                    # Only record response if we're not manually managing the span
+                    span.record_response(response)
+                
+                # Return span context with response if requested for streaming
+                if return_span_context and stream:
+                    logger.info("📤 Returning response with span context for manual token recording")
+                    return response, span
+                else:
+                    return response
 
-        except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
-            last_error = e
-            await handle_error(e, attempt, MAX_RETRIES)
+            except (litellm.exceptions.RateLimitError, OpenAIError, json.JSONDecodeError) as e:
+                last_error = e
+                await handle_error(e, attempt, MAX_RETRIES)
 
-        except Exception as e:
-            logger.error(f"Unexpected error during API call: {str(e)}", exc_info=True)
-            raise LLMError(f"API call failed: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error during API call: {str(e)}", exc_info=True)
+                # Record the error in AgentOps if span is available
+                if span:
+                    span.record_error(e)
+                raise LLMError(f"API call failed: {str(e)}") from e
 
-    error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"
-    if last_error:
-        error_msg += f". Last error: {str(last_error)}"
-    logger.error(error_msg, exc_info=True)
-    raise LLMRetryError(error_msg)
+        error_msg = f"Failed to make API call after {MAX_RETRIES} attempts"
+        if last_error:
+            error_msg += f". Last error: {str(last_error)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # Record the final error in AgentOps if span is available
+        if span:
+            span.record_error(last_error or error_msg)
+        
+        raise LLMRetryError(error_msg)
 
 # Initialize API keys on module import
 setup_api_keys()

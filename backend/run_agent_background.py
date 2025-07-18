@@ -14,14 +14,26 @@ import dramatiq
 import uuid
 from agentpress.thread_manager import ThreadManager
 from services.supabase import DBConnection
-from services import redis
 from dramatiq.brokers.rabbitmq import RabbitmqBroker
 import os
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
 from services.langfuse import langfuse
+from services.agentops import start_agent_trace, end_agent_trace, initialize_agentops, flush_trace
 from utils.retry import retry
 
 import sentry_sdk
 from typing import Dict, Any
+
+# Initialize AgentOps for the worker after environment is loaded
+try:
+    initialize_agentops()
+    logger.info("AgentOps initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize AgentOps: {e}")
 
 rabbitmq_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -41,6 +53,9 @@ async def initialize():
         instance_id = str(uuid.uuid4())[:8]
     await retry(lambda: redis.initialize_async())
     await db.initialize()
+    
+    # Initialize AgentOps in the worker context
+    initialize_agentops()
 
     _initialized = True
     logger.info(f"Initialized agent API with instance ID: {instance_id}")
@@ -156,9 +171,23 @@ async def run_agent_background(
             stop_signal_received = True # Stop the run if the checker fails
 
     trace = langfuse.trace(name="agent_run", id=agent_run_id, session_id=thread_id, metadata={"project_id": project_id, "instance_id": instance_id})
+    
+    # Start AgentOps trace
+    agentops_trace = start_agent_trace(
+        agent_run_id=agent_run_id,
+        thread_id=thread_id,
+        project_id=project_id,
+        model_name=model_name,
+        agent_config=agent_config
+    )
+    
+    # Initialize pending_redis_operations before try block
+    pending_redis_operations = []
+    
     try:
         # Setup Pub/Sub listener for control signals
         pubsub = await redis.create_pubsub()
+        
         try:
             await retry(lambda: pubsub.subscribe(instance_control_channel, global_control_channel))
         except Exception as e:
@@ -181,13 +210,12 @@ async def run_agent_background(
             agent_config=agent_config,
             trace=trace,
             is_agent_builder=is_agent_builder,
-            target_agent_id=target_agent_id
+            target_agent_id=target_agent_id,
+            agentops_trace=agentops_trace  # Pass AgentOps trace context
         )
 
         final_status = "running"
         error_message = None
-
-        pending_redis_operations = []
 
         async for response in agent_gen:
             if stop_signal_received:
@@ -300,10 +328,22 @@ async def run_agent_background(
         await _cleanup_redis_run_lock(agent_run_id)
 
         # Wait for all pending redis operations to complete, with timeout
-        try:
-            await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
+        if pending_redis_operations:
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
+        
+        # Flush and end AgentOps trace
+        if agentops_trace:
+            # Flush pending spans before ending
+            await flush_trace()
+            
+            end_agent_trace(
+                trace_context=agentops_trace,
+                status=final_status,
+                error=error_message
+            )
 
         logger.info(f"Agent run background task fully completed for: {agent_run_id} (Instance: {instance_id}) with final status: {final_status}")
 
